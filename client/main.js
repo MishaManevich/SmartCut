@@ -101,7 +101,7 @@ function safeParseJSON(raw) {
 // Bump this string whenever you need to verify the panel is actually running
 // the latest code. It prints once on load and also shows in the title bar of
 // the About dialog.
-var SMARTCUT_PANEL_BUILD = "v9.17-clear-stale-results-2026-04-19";
+var SMARTCUT_PANEL_BUILD = "v9.19-hero-unit-label-2026-04-19";
 
 document.addEventListener("DOMContentLoaded", function () {
   console.log("[SmartCut] panel build:", SMARTCUT_PANEL_BUILD);
@@ -1576,9 +1576,23 @@ function showResults(data) {
 // and the big number always agree.
 function mmss(totalSec) {
   totalSec = Math.max(0, Math.round(Number(totalSec) || 0));
-  var m = Math.floor(totalSec / 60);
+  var h = Math.floor(totalSec / 3600);
+  var m = Math.floor((totalSec % 3600) / 60);
   var s = totalSec % 60;
-  return m + ":" + (s < 10 ? "0" : "") + s;
+  var pad = function (n) { return n < 10 ? "0" + n : "" + n; };
+  if (h > 0) return h + ":" + pad(m) + ":" + pad(s);
+  return m + ":" + pad(s);
+}
+
+// Pick the natural unit label for the big hero number so the card reads
+// "43 / SEC SAVED", "2:43 / MIN SAVED", or "1:23:45 / HR SAVED" depending
+// on magnitude. Under 60s we also swap the number to a plain integer so the
+// user doesn't see "0:43" when they could just see "43".
+function formatHeroSaved(sec) {
+  sec = Math.max(0, Math.round(Number(sec) || 0));
+  if (sec < 60)    return { num: String(sec), unit: "sec saved" };
+  if (sec < 3600)  return { num: mmss(sec),   unit: "min saved" };
+  return                  { num: mmss(sec),   unit: "hr saved"  };
 }
 
 function renderCutHero(selectedSaved, selectedCount, originalDuration, breakdown) {
@@ -1597,7 +1611,10 @@ function renderCutHero(selectedSaved, selectedCount, originalDuration, breakdown
   var after = Math.max(0, orig - saved);
   var pct   = orig > 0 ? (saved / orig) * 100 : 0;
 
-  savedEl.textContent  = mmss(saved);
+  var savedFmt         = formatHeroSaved(saved);
+  savedEl.textContent  = savedFmt.num;
+  var unitEl           = document.getElementById("heroSavedUnit");
+  if (unitEl) unitEl.textContent = savedFmt.unit;
   beforeEl.textContent = mmss(orig);
   afterEl.textContent  = mmss(after);
   pctEl.textContent    = (pct >= 10 ? Math.round(pct) : pct.toFixed(1)) + "% tighter";

@@ -1524,17 +1524,40 @@ function applyCuts(payloadJSON) {
       log("V" + (videoTrackIndex + 1) + " clips after gap-close: " + clipCountAfterGapClose);
     }
 
-    // ── PHASE 3: optionally re-link surviving V/A clips by time overlap ────
+    // ── PHASE 3: re-link surviving V/A clip pairs on target tracks ─────────
+    //
+    // v9.18: previously this walked EVERY audio track in the sequence and
+    // bulk-relinked any clip that overlapped each video clip via
+    // setSelection + linkSelection. That produced two real bugs:
+    //   1. Over-linking: V2 clips got linked to unrelated audio on A1/A3
+    //      (background music, voiceover, etc.) just because they happened
+    //      to overlap.
+    //   2. Existing-link destruction: setSelection wipes the current
+    //      selection state, and linkSelection merges items into a single
+    //      link group — which can break valid links the previous pair had
+    //      (e.g., A2 split into 3 pieces, all linked to the parent V2;
+    //      bulk relink rewires those links and Premiere ends up showing
+    //      audio clips disconnected from their video parents).
+    //
+    // Now: only relink on the target video track ↔ target audio track(s).
+    // For each surviving video clip, find the audio clip on the target
+    // audio track that aligns with it, and only call linkSelection if
+    // that pair isn't already linked. Skips when no targets are set
+    // (legacy whole-sequence path).
     var relinkCount = 0;
-    if (doRelink && removedVideo > 0) {
+    if (doRelink && removedVideo > 0 && targetVideoTracks && targetAudioTracks &&
+        targetVideoTracks.length && targetAudioTracks.length) {
       log("");
-      log("═══ PHASE 3: RELINK ═══");
+      log("═══ PHASE 3: RELINK (target tracks only) ═══");
       try {
-        relinkCount = relinkByOverlap(seq, videoTrackIndex);
+        relinkCount = relinkTargetPairs(seq, targetVideoTracks, targetAudioTracks);
         log("Relink pairs: " + relinkCount);
       } catch (eLink) {
         log("Relink error: " + eLink);
       }
+    } else if (doRelink && removedVideo > 0) {
+      log("");
+      log("═══ PHASE 3: RELINK skipped (no target tracks defined) ═══");
     }
 
     // ── PHASE 4: audio crossfades at cut boundaries (best-effort) ──────────
@@ -1574,7 +1597,7 @@ function applyCuts(payloadJSON) {
       rippleFellBack: rippleFellBack,
       relinkCount: relinkCount,
       crossfadeCount: crossfadeCount,
-      method: "CTI razor + per-track ripple delete (v9.9, target-track restriction)",
+      method: "CTI razor + per-track ripple delete (v9.18, surgical target-pair relink)",
       logPath: _logPath,
       log: _log
     });
@@ -1591,45 +1614,102 @@ function applyCuts(payloadJSON) {
 }
 
 /**
- * Walk every video clip on videoTrackIndex, find audio clips that overlap
- * its time range across all audio tracks, and linkSelection() them.
+ * Surgical relink (v9.18): for each surviving video clip on the target video
+ * track(s), find the TIME-ALIGNED audio clip on the target audio track(s)
+ * and relink ONLY that pair — but only when the pair isn't already linked.
+ *
+ * Why this matters: Premiere's razor normally preserves per-segment links
+ * (each half of the split video stays linked to the matching half of audio).
+ * But a few scenarios break links — for example, a non-ripple remove that
+ * leaves the opposite track untouched, or a user editing right after a cut.
+ * The old bulk relinker fixed that by rebuilding links from scratch across
+ * the whole sequence, but it also destroyed valid cross-track links and
+ * pulled unrelated music/VO into the link group.
+ *
+ * The surgical approach only touches clips on the tracks SmartCut actually
+ * cut, and only when those clips are genuinely missing their partner.
  */
-function relinkByOverlap(seq, videoTrackIndex) {
-  var vTrack = seq.videoTracks[videoTrackIndex];
-  if (!vTrack || !vTrack.clips) return 0;
+function relinkTargetPairs(seq, videoTrackIndexes, audioTrackIndexes) {
+  if (!videoTrackIndexes || !videoTrackIndexes.length) return 0;
+  if (!audioTrackIndexes || !audioTrackIndexes.length) return 0;
 
   var linked = 0;
-  for (var ci = 0; ci < vTrack.clips.numItems; ci++) {
-    try {
-      var v = vTrack.clips[ci];
-      var vs = safeSeconds(v.start);
-      var ve = safeSeconds(v.end);
 
-      var selection = [v];
-      for (var ati = 0; ati < seq.audioTracks.numTracks; ati++) {
-        var aT = seq.audioTracks[ati];
-        if (!aT || !aT.clips) continue;
-        for (var ak = 0; ak < aT.clips.numItems; ak++) {
+  for (var vIdx = 0; vIdx < videoTrackIndexes.length; vIdx++) {
+    var vTrackIndex = videoTrackIndexes[vIdx];
+    var vTrack = seq.videoTracks[vTrackIndex];
+    if (!vTrack || !vTrack.clips) continue;
+
+    for (var ci = 0; ci < vTrack.clips.numItems; ci++) {
+      var v;
+      try { v = vTrack.clips[ci]; } catch (eV) { continue; }
+      if (!v) continue;
+
+      var vs, ve;
+      try {
+        vs = safeSeconds(v.start);
+        ve = safeSeconds(v.end);
+      } catch (eT) { continue; }
+
+      // Build the set of clip nodeIds that this V clip is already linked to,
+      // so we can skip relinking pairs that are already connected.
+      var existingLinkIds = {};
+      try {
+        var vLinked = v.getLinkedItems ? v.getLinkedItems() : null;
+        if (vLinked && vLinked.numItems) {
+          for (var li = 0; li < vLinked.numItems; li++) {
+            try {
+              var lk = vLinked[li];
+              if (lk && lk.nodeId) existingLinkIds[lk.nodeId] = true;
+            } catch (eLk) {}
+          }
+        }
+      } catch (eGL) {}
+
+      for (var aIdx = 0; aIdx < audioTrackIndexes.length; aIdx++) {
+        var aTrackIndex = audioTrackIndexes[aIdx];
+        var aTrack = seq.audioTracks[aTrackIndex];
+        if (!aTrack || !aTrack.clips) continue;
+
+        for (var ak = 0; ak < aTrack.clips.numItems; ak++) {
+          var a;
+          try { a = aTrack.clips[ak]; } catch (eA) { continue; }
+          if (!a) continue;
+
+          var as_, ae_;
           try {
-            var a = aT.clips[ak];
-            var as_ = safeSeconds(a.start);
-            var ae_ = safeSeconds(a.end);
-            if (as_ < ve - EPSILON_SEC && ae_ > vs + EPSILON_SEC) {
-              selection.push(a);
-            }
-          } catch (e) {}
+            as_ = safeSeconds(a.start);
+            ae_ = safeSeconds(a.end);
+          } catch (eAT) { continue; }
+
+          // Require ~frame-aligned start AND end — only a true sibling
+          // segment from the same razor cut. Overlap alone is not enough
+          // (that's what caused v9.17 to over-link music beds).
+          var startsMatch = Math.abs(as_ - vs) < EPSILON_SEC;
+          var endsMatch   = Math.abs(ae_ - ve) < EPSILON_SEC;
+          if (!startsMatch || !endsMatch) continue;
+
+          // Already linked? Don't rewire — that's what previously broke
+          // valid cross-segment links.
+          var alreadyLinked = false;
+          try {
+            if (a.nodeId && existingLinkIds[a.nodeId]) alreadyLinked = true;
+          } catch (eNI) {}
+          if (alreadyLinked) continue;
+
+          try {
+            seq.setSelection([v, a]);
+            seq.linkSelection();
+            linked++;
+          } catch (eL) {}
+
+          // One audio sibling per V clip is enough on the target A track.
+          break;
         }
       }
-
-      if (selection.length >= 2) {
-        try {
-          seq.setSelection(selection);
-          seq.linkSelection();
-          linked++;
-        } catch (eL) {}
-      }
-    } catch (e) {}
+    }
   }
+
   return linked;
 }
 
