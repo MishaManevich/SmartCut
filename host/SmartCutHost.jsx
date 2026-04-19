@@ -559,7 +559,20 @@ function findClipTrack(seq, targetClip) {
 // Single-clip mode in the UI should prevent this anyway.
 function resolveTargetTracksFromSelection(seq) {
   var sel = collectSelectedClips(seq);
-  if (!sel || sel.length === 0) return null;
+  var trace = [];
+  trace.push("sel.length=" + (sel ? sel.length : 0));
+  if (!sel || sel.length === 0) return { video: [], audio: [], trace: trace.join(" | ") };
+
+  // Log each selected clip so we can tell what Premiere thinks is selected.
+  var videoSelCount = 0;
+  for (var ti = 0; ti < sel.length; ti++) {
+    if (sel[ti].kind === "video") videoSelCount++;
+    trace.push(sel[ti].kind.charAt(0).toUpperCase() + (sel[ti].trackIndex + 1) +
+               " '" + String(sel[ti].clip.name || "?") + "'" +
+               " [" + safeSeconds(sel[ti].clip.start).toFixed(2) +
+               "-" + safeSeconds(sel[ti].clip.end).toFixed(2) + "]");
+  }
+  trace.push("video-selected=" + videoSelCount);
 
   // Find the primary selected video clip (longest = most content).
   var primaryV = null;
@@ -585,39 +598,59 @@ function resolveTargetTracksFromSelection(seq) {
     }
   } else {
     videoSet[primaryV.trackIndex] = true;
+    trace.push("primaryV=V" + (primaryV.trackIndex + 1) +
+               " dur=" + longestDur.toFixed(2));
 
     var vStart = safeSeconds(primaryV.clip.start);
     var vEnd   = safeSeconds(primaryV.clip.end);
     var vDur   = Math.max(0.01, vEnd - vStart);
 
     var coverage = {};
+    var linkedCount = 0;
     try {
       if (primaryV.clip && typeof primaryV.clip.getLinkedItems === "function") {
         var linked = primaryV.clip.getLinkedItems();
         if (linked && linked.numItems) {
+          linkedCount = linked.numItems;
           for (var li = 0; li < linked.numItems; li++) {
             var lc = linked[li];
             var loc = findClipTrack(seq, lc);
-            if (!loc || loc.kind !== "audio") continue;
+            if (!loc) {
+              trace.push("linked[" + li + "]: track unknown");
+              continue;
+            }
+            if (loc.kind !== "audio") {
+              trace.push("linked[" + li + "]: " + loc.kind + " V" + (loc.index + 1) + " (skipped, not audio)");
+              continue;
+            }
             var ls = safeSeconds(lc.start);
             var le = safeSeconds(lc.end);
             var oS = Math.max(ls, vStart);
             var oE = Math.min(le, vEnd);
             var overlap = Math.max(0, oE - oS);
+            trace.push("linked[" + li + "]: A" + (loc.index + 1) +
+                       " [" + ls.toFixed(2) + "-" + le.toFixed(2) + "]" +
+                       " overlap=" + overlap.toFixed(2) + "s");
             if (overlap > 0) {
               coverage[loc.index] = (coverage[loc.index] || 0) + overlap;
             }
           }
         }
       }
-    } catch (eLink) {}
+    } catch (eLink) {
+      trace.push("getLinkedItems threw: " + String(eLink));
+    }
+    trace.push("linkedCount=" + linkedCount + " vDur=" + vDur.toFixed(2));
 
     // Only qualify tracks whose linked audio covers a big chunk of the
     // video clip. Stale / fragment-sized links are rejected.
-    for (var ti in coverage) {
-      if (!coverage.hasOwnProperty(ti)) continue;
-      if (coverage[ti] / vDur >= 0.5) {
-        audioSet[parseInt(ti, 10)] = true;
+    for (var tk in coverage) {
+      if (!coverage.hasOwnProperty(tk)) continue;
+      var ratio = coverage[tk] / vDur;
+      trace.push("A" + (parseInt(tk, 10) + 1) + " cov=" + coverage[tk].toFixed(2) +
+                 "s ratio=" + ratio.toFixed(2) + " " + (ratio >= 0.5 ? "QUALIFIED" : "rejected"));
+      if (ratio >= 0.5) {
+        audioSet[parseInt(tk, 10)] = true;
       }
     }
     // No same-index fallback by design: if the user unlinked V/A, they
@@ -629,7 +662,8 @@ function resolveTargetTracksFromSelection(seq) {
   for (var ka in audioSet) if (audioSet.hasOwnProperty(ka)) audioArr.push(parseInt(ka, 10));
   videoArr.sort(function (a, b) { return a - b; });
   audioArr.sort(function (a, b) { return a - b; });
-  return { video: videoArr, audio: audioArr };
+  trace.push("result: video=[" + videoArr.join(",") + "] audio=[" + audioArr.join(",") + "]");
+  return { video: videoArr, audio: audioArr, trace: trace.join(" | ") };
 }
 
 // Returns [startSec, endSec] of Premiere's In/Out marks, or null if not set.
@@ -717,17 +751,48 @@ function resolveAnalysisPlan(payloadJSON) {
     // are selected, use those clips' bounds; otherwise, use the entire
     // sequence. (In/Out ranges are no longer a scope source.)
     var sel = collectSelectedClips(seq);
-    if (sel.length > 0) {
-      var minS = Infinity, maxS = -Infinity;
-      for (var i = 0; i < sel.length; i++) {
-        var cs = safeSeconds(sel[i].clip.start);
-        var ce = safeSeconds(sel[i].clip.end);
-        if (cs < minS) minS = cs;
-        if (ce > maxS) maxS = ce;
-      }
-      startSec = minS; endSec = maxS;
+
+    // v9.15: single-clip policy. Count video clips only — audio "selected"
+    // status is usually Premiere's Linked Selection auto-selecting the
+    // linked track item, not a distinct user intent. We use the video
+    // clip's bounds as the scope. Rejecting multi-video selection here
+    // prevents the resolver from guessing which V-track the user meant.
+    var videoSel = [];
+    for (var si = 0; si < sel.length; si++) {
+      if (sel[si].kind === "video") videoSel.push(sel[si]);
+    }
+
+    if (videoSel.length > 1) {
+      return jsonStringify({
+        ok: false,
+        error: "Multiple video clips are selected (" + videoSel.length +
+               "). SmartCut works one clip at a time. Click an empty spot " +
+               "to deselect, then click a single clip and try again.\n\n" +
+               "If you clicked just one clip and still see this, toggle " +
+               "Premiere's Linked Selection off (Shift+Cmd+L) — your " +
+               "timeline has cross-track links that are causing multiple " +
+               "clips to select together."
+      });
+    }
+
+    if (videoSel.length === 1) {
+      var theClip = videoSel[0];
+      startSec = safeSeconds(theClip.clip.start);
+      endSec   = safeSeconds(theClip.clip.end);
       resolvedScope = "selected";
-      scopeDesc = sel.length + " selected clip" + (sel.length !== 1 ? "s" : "");
+      scopeDesc = "selected clip on V" + (theClip.trackIndex + 1);
+    } else if (sel.length > 0) {
+      // Audio-only selection (rare). Use its bounds.
+      var aMinS = Infinity, aMaxS = -Infinity;
+      for (var ai2 = 0; ai2 < sel.length; ai2++) {
+        var acs = safeSeconds(sel[ai2].clip.start);
+        var ace = safeSeconds(sel[ai2].clip.end);
+        if (acs < aMinS) aMinS = acs;
+        if (ace > aMaxS) aMaxS = ace;
+      }
+      startSec = aMinS; endSec = aMaxS;
+      resolvedScope = "selected";
+      scopeDesc = sel.length + " selected audio clip" + (sel.length !== 1 ? "s" : "");
     } else {
       startSec = 0; endSec = seqEnd;
       resolvedScope = "entire";
@@ -877,7 +942,7 @@ function resolveAnalysisPlan(payloadJSON) {
 
 function applyCuts(payloadJSON) {
   logInit();
-  log("applyCuts() v9.14 - linked-only audio targets, no same-index fallback");
+  log("applyCuts() v9.15 - one clip at a time, strict target enforcement");
   log("Premiere version: " + (app.version || "unknown"));
 
   try {
@@ -908,24 +973,35 @@ function applyCuts(payloadJSON) {
     var scopeEnd   = (typeof payload.scopeEndSec === "number")
       ? payload.scopeEndSec :  Infinity;
 
-    // v9.9: target-track restriction. When the user selects one clip, these
-    // arrays contain only that clip's video track + its linked audio track.
-    // Any track not in these sets is skipped entirely during razor + remove,
-    // so unrelated clips on V1/V3/A1/A3 stay untouched. Null means no
-    // restriction (whole-sequence mode; not reachable from current UI).
-    var targetVideoTracks = (payload.targetVideoTracks && payload.targetVideoTracks.length)
-      ? payload.targetVideoTracks : null;
-    var targetAudioTracks = (payload.targetAudioTracks && payload.targetAudioTracks.length)
-      ? payload.targetAudioTracks : null;
+    // v9.15: target-track restriction. These arrays contain ONLY the tracks
+    // the user's selection covers (one video track + its linked audio track).
+    //
+    // CRITICAL: we distinguish between "absent" (undefined, meaning the
+    // client never sent targets = legacy whole-sequence mode) and "empty"
+    // (explicit [] = "no track qualified", e.g. video with no linked audio).
+    // Previously the code collapsed both to null and treated it as "no
+    // restriction = touch every track" — so when the client passed
+    // targetAudioTracks: [] meaning "don't touch any audio", the host
+    // cheerfully razored A1, A2, A3. That's how user-reported cuts ended
+    // up on unrelated tracks.
+    var hasVTargets = (payload.targetVideoTracks !== undefined &&
+                       payload.targetVideoTracks !== null);
+    var hasATargets = (payload.targetAudioTracks !== undefined &&
+                       payload.targetAudioTracks !== null);
+    var targetVideoTracks = hasVTargets ? (payload.targetVideoTracks || []) : null;
+    var targetAudioTracks = hasATargets ? (payload.targetAudioTracks || []) : null;
     var vTargetSet = null, aTargetSet = null;
-    if (targetVideoTracks) {
+    if (hasVTargets) {
       vTargetSet = {};
       for (var tvi = 0; tvi < targetVideoTracks.length; tvi++) vTargetSet[targetVideoTracks[tvi]] = true;
     }
-    if (targetAudioTracks) {
+    if (hasATargets) {
       aTargetSet = {};
       for (var tai = 0; tai < targetAudioTracks.length; tai++) aTargetSet[targetAudioTracks[tai]] = true;
     }
+    // If target sets were supplied (even empty), only tracks in the set are
+    // touchable. Empty set => nothing on that kind. If not supplied at all
+    // (legacy path), no restriction.
     function _shouldTouchV(idx) { return vTargetSet === null || vTargetSet[idx] === true; }
     function _shouldTouchA(idx) { return aTargetSet === null || aTargetSet[idx] === true; }
     // v9.6: asymmetric padding — word TAILS (fricatives like "s","f","th")
