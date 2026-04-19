@@ -93,20 +93,38 @@ function safeParseJSON(raw) {
   var s = String(raw).trim();
   if (s === "" || s === "undefined" || s === "null") return null;
   try { return JSON.parse(s); }
-  catch (e) { console.warn("[SmartCut] JSON parse failed:", s.substring(0, 200), e.message); return null; }
+  catch (e) { dwarn("[SmartCut] JSON parse failed:", s.substring(0, 200), e.message); return null; }
 }
 
-// ─── Init ───────────────────────────────────────────────────────────────────
+// ─── Debug gating ──────────────────────────────────────────────────────────
+//
+// Flip SMARTCUT_DEBUG to true when diagnosing issues in development. In the
+// shipped build it stays false so a user who opens CEP DevTools (or watches
+// stdout from Premiere) doesn't see internal chatter — build markers, raw
+// host responses, scope-polling traces, etc.
+//
+// Everything routed through dbg/dwarn/derr is a no-op when the flag is off.
+// Real errors still surface to the user through the status bar and the
+// friendly error card in the UI; the gated log lines are developer-only.
 
-// Bump this string whenever you need to verify the panel is actually running
-// the latest code. It prints once on load and also shows in the title bar of
-// the About dialog.
-var SMARTCUT_PANEL_BUILD = "v9.19-hero-unit-label-2026-04-19";
+var SMARTCUT_DEBUG = false;
+
+function dbg()  { if (SMARTCUT_DEBUG) console.log.apply(console, arguments); }
+function dwarn(){ if (SMARTCUT_DEBUG) console.warn.apply(console, arguments); }
+function derr() { if (SMARTCUT_DEBUG) console.error.apply(console, arguments); }
+
+// ─── Init ───────────────────────────────────────────────────────────────────
+//
+// Internal build marker — used to confirm the shipped code matches the git
+// commit during support triage. Never shown in the UI; only emitted when
+// SMARTCUT_DEBUG is on. The user-facing version comes from the manifest
+// (see Updater.currentVersion) and is rendered in the About dialog.
+var SMARTCUT_PANEL_BUILD = "v1.0.0-public-polish-2026-04-19";
 
 document.addEventListener("DOMContentLoaded", function () {
-  console.log("[SmartCut] panel build:", SMARTCUT_PANEL_BUILD);
-  console.log("[SmartCut] ffmpeg loader present:",
-              typeof AudioAnalyzer !== "undefined" && typeof AudioAnalyzer.loadSourceForAnalysis === "function");
+  dbg("[SmartCut] panel build:", SMARTCUT_PANEL_BUILD);
+  dbg("[SmartCut] ffmpeg loader present:",
+      typeof AudioAnalyzer !== "undefined" && typeof AudioAnalyzer.loadSourceForAnalysis === "function");
   loadSettings();
   initCustomSelects();
   checkLicense();
@@ -127,7 +145,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
 function checkLicense() {
   if (!window.License) {
-    console.error("[SmartCut] License module missing");
+    derr("[SmartCut] License module missing");
     showLicense("License module failed to load.");
     return;
   }
@@ -488,8 +506,8 @@ function applyScopeInfo(info, opts) {
     var analyzedFp = analysisResult.analyzedClipFingerprint || null;
     var currentFp  = computeScopeFingerprintForAnalysis();
     if (analyzedFp && currentFp && analyzedFp !== currentFp) {
-      console.log("[SmartCut] selection changed — clearing stale results",
-                  "analyzed=", analyzedFp, "current=", currentFp);
+          dbg("[SmartCut] selection changed — clearing stale results",
+              "analyzed=", analyzedFp, "current=", currentFp);
       var resSec = document.getElementById("resultsSection");
       if (resSec) resSec.style.display = "none";
       analysisResult = null;
@@ -522,15 +540,23 @@ function refreshSequence() { refreshScope(); }
 // early when nothing has changed, so there's no DOM thrash.
 
 var _scopeLastLog = null; // dedup console noise to one line per distinct state
-var _fileLogPath  = "/tmp/smartcut-debug.log"; // mirror of console output so the
-                                               // dev can tail it without DevTools
-var _fileLogFs    = null;                      // cached require('fs'), if available
+
+// Dev-only mirror of scope-polling output to a file so the dev can tail it
+// without opening CEP DevTools. Completely inert unless SMARTCUT_DEBUG is on,
+// at which point it writes to the temp dir (not Desktop, not /tmp root).
+var _fileLogPath  = null;
+var _fileLogFs    = null;
 function fileLog(line) {
+  if (!SMARTCUT_DEBUG) return;
   try {
     if (_fileLogFs === null) {
       _fileLogFs = (typeof require === "function") ? require("fs") : false;
     }
     if (!_fileLogFs) return;
+    if (!_fileLogPath) {
+      var os = require("os");
+      _fileLogPath = os.tmpdir() + "/smartcut-debug.log";
+    }
     var stamp = new Date().toISOString();
     _fileLogFs.appendFileSync(_fileLogPath, stamp + " " + line + "\n");
   } catch (e) {}
@@ -557,7 +583,7 @@ function pollScope() {
       var msg = "[SmartCut/pollScope] selection=" + selCount + " strategy=" + strategy +
                 " seq=\"" + seqName + "\" " +
                 (clipList ? "clips: " + clipList : "(no clips selected)");
-      console.log(msg);
+      dbg(msg);
       fileLog(msg);
     }
     applyScopeInfo(info);
@@ -568,8 +594,8 @@ function startScopePolling() {
   if (_scopePollTimer) return;
   _scopePollTimer = setInterval(pollScope, 700);
   var bootMsg = "[SmartCut] scope polling started (700ms interval) @ " + new Date().toISOString();
-  console.log(bootMsg);
-  try { if (typeof require === "function") { require("fs").writeFileSync(_fileLogPath, bootMsg + "\n"); } } catch (e) {}
+  dbg(bootMsg);
+  fileLog(bootMsg);
   pollScope(); // fire one immediately so the card populates on first paint
 }
 
@@ -1225,11 +1251,11 @@ function analyzeSequence() {
     var scopeStart = plan.scope.startSec;
     var scopeEnd   = plan.scope.endSec;
 
-    console.log("[SmartCut] scope:", plan.scope, "audio:", plan.audio,
-                "clips:", clips.length);
-    console.log("[SmartCut] targetTracks:", plan.targetTracks);
+    dbg("[SmartCut] scope:", plan.scope, "audio:", plan.audio,
+        "clips:", clips.length);
+    dbg("[SmartCut] targetTracks:", plan.targetTracks);
     if (plan.targetTracks && plan.targetTracks.trace) {
-      console.log("[SmartCut] resolver trace:", plan.targetTracks.trace);
+      dbg("[SmartCut] resolver trace:", plan.targetTracks.trace);
     }
     status("Analyzing " + clips.length + " clip" +
            (clips.length !== 1 ? "s" : "") + " on " + plan.audio.trackLabel +
@@ -1283,7 +1309,7 @@ function analyzeSequence() {
           .then(function (loaded) {
             _loaded = loaded;
             if (loaded.source === "ffmpeg") {
-              console.log("[SmartCut] decoded '" + clip.clipName + "' via ffmpeg extraction");
+              dbg("[SmartCut] decoded '" + clip.clipName + "' via ffmpeg extraction");
             }
             return analyzer.decode(loaded.arrayBuffer);
           })
@@ -1366,7 +1392,7 @@ function analyzeSequence() {
               var base = pct;
               progress(base + Math.round((2) * (wpct / 100)), msg);
             },
-            onLog: function (line) { console.log("[whisper]", line); }
+            onLog: function (line) { dbg("[whisper]", line); }
           }).then(function (transcript) {
             try { require("fs").unlinkSync(tmpWav); } catch (e) {}
             transcriptResults.push({ clip: entry.clip, transcript: transcript });
@@ -1401,9 +1427,9 @@ function analyzeSequence() {
           var detPromise;
           if (window.Embedder && window.Embedder.isAvailable && window.Embedder.isAvailable()) {
             if (!window.Embedder.isLoaded()) progress(88, "Loading AI semantic model\u2026");
-            detPromise = BadTakeDetector.detect(transcript, { useSemantic: true, debug: true });
+            detPromise = BadTakeDetector.detect(transcript, { useSemantic: true, debug: SMARTCUT_DEBUG });
           } else {
-            detPromise = BadTakeDetector.detect(transcript, { useSemantic: false, debug: true });
+            detPromise = BadTakeDetector.detect(transcript, { useSemantic: false, debug: SMARTCUT_DEBUG });
           }
           return detPromise.then(function (badTakes) {
             (badTakes || []).forEach(function (r) {
@@ -1513,17 +1539,22 @@ function analyzeSequence() {
     }
 
   }).catch(function (err) {
-    console.error("[SmartCut] Analyze error:", err);
+    derr("[SmartCut] Analyze error:", err);
     setProcessing(false);
-    status("Analysis error: " + (err.message || err));
-    showDiagPanel(
-      "ANALYSIS FAILED\n\n" +
-      (err.message || String(err)) + "\n\n" +
+    var errText = err && (err.message || String(err)) || "Unknown error";
+    status("Couldn't analyze this clip.");
+    showErrorCard(
+      "Couldn't analyze this clip",
+      "SmartCut couldn't read audio from this clip. This usually means the " +
+      "source file is offline, moved, or in a codec we can't decode directly. " +
+      "Try re-linking the media in Premiere, or transcode the source to H.264 " +
+      "MP4 or WAV and re-run Analyze.",
+      "Error: " + errText + "\n\n" +
       "Possible causes:\n" +
-      " 1. The source media is in a codec Chromium can't decode (e.g. ProRes).\n" +
-      "    Workaround: transcode the source to H.264 MP4 or WAV, then re-link.\n" +
-      " 2. The file path contains characters Node's fs can't handle.\n" +
-      " 3. The clip's source media was moved or is offline in Premiere."
+      "  1. Codec not decodable in-panel (e.g. ProRes, DNxHR).\n" +
+      "  2. Source media is offline or its path contains characters Node.fs can't handle.\n" +
+      "  3. The clip was trimmed to an empty range.\n\n" +
+      "Build: " + SMARTCUT_PANEL_BUILD
     );
   });
 }
@@ -1901,8 +1932,8 @@ function applyCutsToTimeline() {
   var currentFp  = computeScopeFingerprintForAnalysis();
   var analyzedFp = analysisResult.analyzedClipFingerprint || null;
   if (analyzedFp && currentFp && analyzedFp !== currentFp) {
-    console.warn("[SmartCut] selection changed since analysis:",
-                 "analyzed=", analyzedFp, "current=", currentFp);
+    dwarn("[SmartCut] selection changed since analysis:",
+          "analyzed=", analyzedFp, "current=", currentFp);
     status("Selection changed since Analyze. Click Analyze again to refresh.");
     return;
   }
@@ -1928,7 +1959,7 @@ function applyCutsToTimeline() {
     // No linked audio AND no auto-detected audio source overlaps the clip.
     // Almost always means the clip is genuinely video-only (b-roll, title,
     // graphic). Let it through with a short notice — no scary modal.
-    console.warn("[SmartCut] no audio target — cutting video only");
+    dwarn("[SmartCut] no audio target — cutting video only");
     status("Cutting video only (no audio detected for this clip)\u2026");
   }
 
@@ -1967,10 +1998,10 @@ function applyCutsToTimeline() {
         backupName:         snap.backupName,
         originalSequenceID: snap.originalSequenceID
       };
-      console.log("[SmartCut] snapshot saved:", _snapshot);
+      dbg("[SmartCut] snapshot saved:", _snapshot);
     } else {
       _snapshot = null;
-      console.warn("[SmartCut] snapshot failed — proceeding without undo safety net:", snapRaw);
+      dwarn("[SmartCut] snapshot failed — proceeding without undo safety net:", snapRaw);
     }
     runApplyCuts(regions, trackIndex, s, scope, analysisResult.targetTracks);
   });
@@ -2000,25 +2031,33 @@ function runApplyCuts(regions, trackIndex, s, scope, targetTracks) {
   cs.evalScript(script, function (r) {
     setProcessing(false);
     var res = safeParseJSON(r);
-    console.log("[SmartCut] applyCuts raw:", r);
+    dbg("[SmartCut] applyCuts raw:", r);
 
     if (!res) {
-      status("No response from host script. See diagnostics.");
-      showDiagPanel(
-        "HOST SCRIPT DID NOT RESPOND\n\n" +
-        "Possible causes:\n" +
-        " 1. SmartCutHost.jsx is not installed in the correct location.\n" +
-        " 2. Panel needs reload (close + reopen from Window > Extensions).\n" +
-        " 3. Syntax error in host script.\n\n" +
-        "Raw: " + String(r)
+      status("SmartCut didn't respond.");
+      showErrorCard(
+        "SmartCut didn't respond",
+        "The extension lost contact with Premiere. Close and reopen the panel " +
+        "from Window > Extensions, then try Apply Cuts again.",
+        "Raw host response:\n" + String(r) + "\n\n" +
+        "Build: " + SMARTCUT_PANEL_BUILD
       );
       return;
     }
 
     if (res.error) {
-      status("Error: " + res.error);
-      showDiagPanel("ERROR: " + res.error + "\n\n" +
-        (res.log ? "--- Host Log ---\n" + (Array.isArray(res.log) ? res.log.join("\n") : res.log) : ""));
+      status("Couldn't apply cuts.");
+      var hostLog = res.log
+        ? (Array.isArray(res.log) ? res.log.join("\n") : String(res.log))
+        : "";
+      showErrorCard(
+        "Couldn't apply cuts",
+        "SmartCut couldn't complete the edit. The timeline wasn't changed. " +
+        "Try clicking on the Program monitor first, then run Apply Cuts again.",
+        "Host error: " + res.error +
+        (hostLog ? "\n\n--- Host Log ---\n" + hostLog : "") +
+        "\n\nBuild: " + SMARTCUT_PANEL_BUILD
+      );
       return;
     }
 
@@ -2043,12 +2082,12 @@ function runApplyCuts(regions, trackIndex, s, scope, targetTracks) {
     if (!res.success || (res.removeErrors && res.removeErrors.length)) {
       var diag = [
         "=== Apply Cuts ===",
-        "Method: "      + (res.method || "unknown"),
+        "Method: "       + (res.method || "unknown"),
         "Cuts applied: " + (res.cutsApplied || 0) + "/" + (res.totalRegions || 0),
         "Clips: " + (res.clipCountBefore || "?") + " → " +
                     (res.clipCountAfterRazor || "?") + " (after razor) → " +
                     (res.clipCountFinal || "?") + " (after delete)",
-        "Razor calls: " + (res.razorCount || 0),
+        "Razor calls: "  + (res.razorCount || 0),
         "Relink pairs: " + (res.relinkCount || 0)
       ];
       if (res.razorErrors && res.razorErrors.length)
@@ -2057,24 +2096,136 @@ function runApplyCuts(regions, trackIndex, s, scope, targetTracks) {
         diag.push("", "Remove errors:", res.removeErrors.map(function (e) { return "  " + e; }).join("\n"));
       if (res.log)
         diag.push("", "--- Host Log ---", Array.isArray(res.log) ? res.log.join("\n") : res.log);
-      showDiagPanel(diag.join("\n"));
+      diag.push("", "Build: " + SMARTCUT_PANEL_BUILD);
+
+      var fullySucceeded = !!res.success && !(res.removeErrors && res.removeErrors.length);
+      if (fullySucceeded) {
+        // success path shouldn't reach here, but guard just in case
+        hideDiagPanel();
+      } else {
+        showErrorCard(
+          "Cuts applied with issues",
+          "Most of the edits landed, but SmartCut couldn't remove every region " +
+          "cleanly. Review the timeline and click Restore original if you want " +
+          "to roll back.",
+          diag.join("\n")
+        );
+      }
     }
   });
 }
 
-// ─── Misc helpers ───────────────────────────────────────────────────────────
+// ─── Error card ─────────────────────────────────────────────────────────────
+//
+// Public API:
+//   showErrorCard(title, message, details)
+//     title:   short human heading ("Couldn't analyze this clip")
+//     message: one or two sentences for the user, no jargon
+//     details: optional technical dump — hidden behind a Details toggle and
+//              included when the user clicks Copy. Safe to pass engine logs,
+//              raw host responses, stack traces, etc.
+//   hideDiagPanel()      — dismisses the card
+//   showDiagPanel(text)  — legacy shim that parses old "TITLE\n\n..." strings
+//
+// Copy uses the async Clipboard API with a synchronous execCommand fallback
+// because CEP's Chromium doesn't always grant clipboard-write permission.
 
-function showDiagPanel(text) {
-  var panel = document.getElementById("diagPanel");
+function showErrorCard(title, message, details) {
+  var panel   = document.getElementById("diagPanel");
   if (!panel) return;
-  panel.textContent = text;
+  var titleEl = document.getElementById("diagTitle");
+  var msgEl   = document.getElementById("diagMessage");
+  var detEl   = document.getElementById("diagDetails");
+  var chevEl  = document.getElementById("diagDetailsChevron");
+
+  if (titleEl) titleEl.textContent = title   || "Something went wrong";
+  if (msgEl)   msgEl.textContent   = message || "SmartCut hit an unexpected error. Try running Analyze again.";
+
+  if (detEl) {
+    var text = (details == null) ? "" : String(details);
+    detEl.textContent = text;
+    detEl.style.display = "none";
+  }
+  if (chevEl) chevEl.textContent = "\u25B8";
+
   panel.style.display = "block";
-  panel.scrollTop = 0;
+  try { panel.scrollIntoView({ behavior: "smooth", block: "center" }); } catch (e) {}
 }
+
+// Legacy shim — kept for any caller still passing the old ALL-CAPS dump.
+function showDiagPanel(text) {
+  var s = String(text || "");
+  var firstBlank = s.indexOf("\n\n");
+  if (firstBlank === -1) {
+    showErrorCard("Something went wrong", s, "");
+    return;
+  }
+  var rawTitle = s.slice(0, firstBlank).trim();
+  var rest     = s.slice(firstBlank + 2);
+  showErrorCard(_humanizeErrorTitle(rawTitle), rest, rest);
+}
+
+function _humanizeErrorTitle(t) {
+  if (!t) return "Something went wrong";
+  var lower = String(t).toLowerCase();
+  if (lower.indexOf("analysis failed") !== -1)                          return "Couldn't analyze this clip";
+  if (lower.indexOf("host") !== -1 && lower.indexOf("respond") !== -1)  return "SmartCut didn't respond";
+  if (lower.indexOf("error:") === 0)                                    return "Couldn't apply cuts";
+  return t.charAt(0) + t.slice(1).toLowerCase();
+}
+
 function hideDiagPanel() {
   var panel = document.getElementById("diagPanel");
   if (panel) panel.style.display = "none";
 }
+
+function toggleDiagDetails() {
+  var detEl  = document.getElementById("diagDetails");
+  var chevEl = document.getElementById("diagDetailsChevron");
+  if (!detEl) return;
+  var isOpen = detEl.style.display !== "none";
+  detEl.style.display = isOpen ? "none" : "block";
+  if (chevEl) chevEl.textContent = isOpen ? "\u25B8" : "\u25BE";
+}
+
+function copyDiagDetails(btn) {
+  var title   = (document.getElementById("diagTitle")   || {}).textContent || "";
+  var message = (document.getElementById("diagMessage") || {}).textContent || "";
+  var details = (document.getElementById("diagDetails") || {}).textContent || "";
+  var payload = title + "\n\n" + message + (details ? "\n\n" + details : "");
+
+  var confirm = function () {
+    if (!btn) return;
+    var original = btn.textContent;
+    btn.textContent = "Copied";
+    setTimeout(function () { btn.textContent = original; }, 1200);
+  };
+
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(payload).then(confirm, function () {
+      _fallbackCopy(payload); confirm();
+    });
+    return;
+  }
+  _fallbackCopy(payload);
+  confirm();
+}
+
+function _fallbackCopy(text) {
+  try {
+    var ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+  } catch (e) {}
+}
+
+// ─── Misc helpers ───────────────────────────────────────────────────────────
 
 // ─── Snapshot / Restore ─────────────────────────────────────────────────────
 //

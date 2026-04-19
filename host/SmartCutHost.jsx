@@ -49,19 +49,45 @@ var EPSILON_SEC      = 0.04;   // ~1 frame @ 24fps — clip-bound match toleranc
 // ═══════════════════════════════════════════════════════════════════════════
 // Logging
 // ═══════════════════════════════════════════════════════════════════════════
+//
+// v1.0 public-release behavior:
+//   - Logs are NEVER written to the user's Desktop or Documents.
+//   - On success, no file is written at all — the in-memory _log is returned
+//     to the panel, which keeps it hidden unless the user opens diagnostics.
+//   - On error (or when forced by testCut / runDiagnostics), the log is
+//     written to a hidden app-data folder:
+//       macOS:   ~/Library/Application Support/SmartCut/Logs/engine-<ts>.log
+//       Windows: %APPDATA%\SmartCut\Logs\engine-<ts>.log
+//     Folder.userData resolves to the right spot on both.
+//   - A single fallback to Folder.temp is kept so support can still recover a
+//     log on a locked-down machine where userData isn't writable.
+
+var SMARTCUT_HOST_DEBUG = false;  // flip to true to force-write logs every run
 
 var _log = [];
 var _logPath = "";
+var _hasError = false;
 
-function logInit() { _log = []; _logPath = ""; }
+function logInit() { _log = []; _logPath = ""; _hasError = false; }
 function log(msg)  { _log.push(String(msg)); }
+function logError(msg) { _hasError = true; _log.push("[ERROR] " + String(msg)); }
 
-function writeLogFile() {
+function _pad(n) { return n < 10 ? "0" + n : "" + n; }
+function _timestampForFile() {
+  var d = new Date();
+  return d.getFullYear() + _pad(d.getMonth() + 1) + _pad(d.getDate()) +
+         "-" + _pad(d.getHours()) + _pad(d.getMinutes()) + _pad(d.getSeconds());
+}
+
+function writeLogFile(force) {
+  // Skip the write entirely on success paths unless the dev flag is on.
+  if (!force && !_hasError && !SMARTCUT_HOST_DEBUG) return;
+
+  var name = "engine-" + _timestampForFile() + ".log";
   var paths = [];
-  try { paths.push(Folder.userData.fsName + "/SmartCutPro/debug.log"); } catch (e) {}
-  try { paths.push(Folder.myDocuments.fsName + "/SmartCutPro_debug.log"); } catch (e) {}
-  try { paths.push(Folder.desktop.fsName + "/SmartCutPro_debug.log"); } catch (e) {}
-  try { paths.push(Folder.temp.fsName   + "/SmartCutPro_debug.log"); } catch (e) {}
+  try { paths.push(Folder.userData.fsName + "/SmartCut/Logs/" + name); } catch (e) {}
+  try { paths.push(Folder.temp.fsName    + "/SmartCut-" + name);       } catch (e) {}
+
   for (var p = 0; p < paths.length; p++) {
     try {
       var f = new File(paths[p]);
@@ -1240,6 +1266,7 @@ function applyCuts(payloadJSON) {
     log("Target-track razor effect: " + razorTargetDetails.join(", "));
 
     if (!razorDidCut) {
+      logError("Razor had no effect on target tracks");
       writeLogFile();
       return jsonStringify({
         success: false,
@@ -1603,7 +1630,7 @@ function applyCuts(payloadJSON) {
     });
 
   } catch (fatal) {
-    log("FATAL: " + String(fatal.message || fatal));
+    logError("FATAL: " + String(fatal.message || fatal));
     writeLogFile();
     return jsonStringify({
       error: "applyCuts fatal: " + String(fatal.message || fatal),
@@ -1858,7 +1885,9 @@ function testCut() {
     result.error = "testCut fatal: " + String(e.message || e);
   }
 
-  writeLogFile();
+  // testCut is an explicit diagnostic tool — always write so support has
+  // something to work from.
+  writeLogFile(true);
   result.log = _log;
   result.logPath = _logPath;
   return jsonStringify(result);
@@ -1958,7 +1987,9 @@ function runDiagnostics() {
     }
   } catch (e) { d.errors.push("Diagnostics: " + String(e)); }
 
-  writeLogFile();
+  // runDiagnostics is user-invoked — always write so support has something
+  // to work from.
+  writeLogFile(true);
   d.logPath = _logPath;
   d.log     = _log;
   return jsonStringify(d);

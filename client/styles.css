@@ -1234,21 +1234,86 @@ input[type="range"]::-webkit-slider-thumb:hover { background: var(--cyan-hover);
   border-top: 1px solid var(--border);
 }
 
-/* ─── Diagnostics Panel (error output) ───────────────────────────────────── */
+/* ─── Error Card (shown when Analyze / Apply fail) ────────────────────────
+ *
+ * Polished replacement for the old <pre>-dump diag panel. The user-facing
+ * surface is:
+ *    [ ⚠ Title ]
+ *    one-sentence message in plain English
+ *    [ ▸ Details ]              [ Copy ] [ Dismiss ]
+ * Raw engine output only shows when the user clicks Details, and Copy grabs
+ * the full payload (title + message + details) for support emails.
+ */
 
-.diag-panel {
+.error-card {
   margin: 0 14px 12px;
+  padding: 12px 14px;
+  background: rgba(239, 68, 68, 0.06);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.error-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #f87171;
+  margin-bottom: 6px;
+}
+
+.error-card-header strong {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.1px;
+}
+
+.error-card-body {
+  margin: 0 0 10px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.error-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 11px;
+}
+
+.error-card-actions .error-card-spacer { flex: 1; }
+
+.error-card-actions .btn-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: 0;
+  padding: 2px 0;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  font-family: inherit;
+}
+
+.error-card-actions .btn-link:hover { color: var(--text-primary); }
+
+.error-card-details {
+  margin: 10px 0 0;
   padding: 10px 12px;
   background: #111111;
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: 4px;
   font-family: "SF Mono", "Menlo", "Monaco", "Consolas", monospace;
   font-size: 10px;
-  line-height: 1.6;
-  color: #aaaaaa;
+  line-height: 1.55;
+  color: #9ca3af;
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 300px;
+  max-height: 260px;
   overflow-y: auto;
 }
 

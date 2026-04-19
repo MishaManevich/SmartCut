@@ -212,8 +212,32 @@
         </button>
       </div>
 
-      <!-- Error / diagnostics output (shown only when something fails) -->
-      <pre id="diagPanel" class="diag-panel" style="display:none;"></pre>
+      <!-- Friendly error card, shown only when something fails. Short human
+           message up top; raw diagnostic text is hidden behind a Details
+           toggle and a Copy button so the user can paste it into a support
+           email without seeing engine internals by default. -->
+      <div id="diagPanel" class="error-card" style="display:none;" role="alert" aria-live="polite">
+        <div class="error-card-header">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="12" y1="8" x2="12" y2="12"/>
+            <line x1="12" y1="16" x2="12.01" y2="16"/>
+          </svg>
+          <strong id="diagTitle">Something went wrong</strong>
+        </div>
+        <p class="error-card-body" id="diagMessage"></p>
+        <div class="error-card-actions">
+          <button type="button" class="btn-link" onclick="toggleDiagDetails()">
+            <span id="diagDetailsChevron">&#9656;</span>
+            <span id="diagDetailsLabel">Details</span>
+          </button>
+          <span class="error-card-spacer"></span>
+          <button type="button" class="btn-link" onclick="copyDiagDetails(this)">Copy</button>
+          <button type="button" class="btn-link" onclick="hideDiagPanel()">Dismiss</button>
+        </div>
+        <pre id="diagDetails" class="error-card-details" style="display:none;"></pre>
+      </div>
 
       <!-- Progress -->
       <div class="section" id="progressSection" style="display:none;">

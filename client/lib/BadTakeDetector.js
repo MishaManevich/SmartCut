@@ -421,7 +421,7 @@
       return { regions: out, usedIdx: usedIdx };
     }).catch(function (err) {
       // If the embedder fails, degrade gracefully — heuristic results still apply.
-      console.warn("[BadTakeDetector] semantic stage failed:", err);
+      if (DEBUG) console.warn("[BadTakeDetector] semantic stage failed:", err);
       return { regions: [], usedIdx: usedIdx };
     });
   }
