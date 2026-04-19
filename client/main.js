@@ -101,7 +101,7 @@ function safeParseJSON(raw) {
 // Bump this string whenever you need to verify the panel is actually running
 // the latest code. It prints once on load and also shows in the title bar of
 // the About dialog.
-var SMARTCUT_PANEL_BUILD = "v9.16-auto-audio-fallback-2026-04-19";
+var SMARTCUT_PANEL_BUILD = "v9.17-clear-stale-results-2026-04-19";
 
 document.addEventListener("DOMContentLoaded", function () {
   console.log("[SmartCut] panel build:", SMARTCUT_PANEL_BUILD);
@@ -478,6 +478,27 @@ function applyScopeInfo(info, opts) {
 
   _scopeFingerprint = fp;
   renderScopeCard();
+
+  // v9.17: auto-clear stale results when the user clicks a different clip.
+  // The old behavior left clip A's regions on screen even after the user
+  // had moved on to clip B, which made it look like SmartCut was about to
+  // apply A's cuts to B. Clear the results panel + analysis state and
+  // give a one-line hint so the user knows to re-run Analyze.
+  if (analysisResult) {
+    var analyzedFp = analysisResult.analyzedClipFingerprint || null;
+    var currentFp  = computeScopeFingerprintForAnalysis();
+    if (analyzedFp && currentFp && analyzedFp !== currentFp) {
+      console.log("[SmartCut] selection changed — clearing stale results",
+                  "analyzed=", analyzedFp, "current=", currentFp);
+      var resSec = document.getElementById("resultsSection");
+      if (resSec) resSec.style.display = "none";
+      analysisResult = null;
+      selectedRegions = {};
+      clearSnapshot();
+      hideDiagPanel();
+      status("New clip selected. Click Analyze to scan it.");
+    }
+  }
 }
 
 // Explicit refresh — user clicked the 🔄 button, finished Apply, etc.
