@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SmartCut</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+
+    <!-- Header -->
+    <header class="header">
+      <div class="logo-row">
+        <!-- Double-edge safety razor blade — body, central mounting slot,
+             and two pin-holes. Horizontal, matches the classic DE silhouette. -->
+        <svg class="logo-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="7.5" width="20" height="9" rx="1.8"/>
+          <rect x="7.5" y="10.8" width="9" height="2.4" rx="1.2"/>
+          <circle cx="4.8" cy="12" r="0.9"/>
+          <circle cx="19.2" cy="12" r="0.9"/>
+        </svg>
+        <h1 class="logo-text">Smart<span class="accent">Cut</span></h1>
+      </div>
+      <span class="version-badge" id="licenseBadge">Active Trial</span>
+    </header>
+
+    <!-- License Panel -->
+    <div id="licensePanel" class="panel" style="display:none;">
+      <div class="panel-centered">
+        <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="var(--cyan)" stroke-width="1.5">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+          <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+        </svg>
+        <h2>Activate SmartCut</h2>
+        <p class="muted">Enter the license key emailed to you after purchase, or start a free trial.</p>
+        <input type="text" id="licenseKeyInput" class="text-input" placeholder="XXXX-XXXX-XXXX-XXXX" spellcheck="false">
+        <button class="btn-primary btn-full" onclick="activateLicense()">Activate License</button>
+        <button class="btn-ghost btn-full" onclick="startTrial()">Start 7-Day Free Trial</button>
+        <button class="btn-link btn-full" onclick="openPurchasePage()">Don&rsquo;t have a license? Buy one &rarr;</button>
+        <p id="licenseError" class="error-text" style="display:none;"></p>
+      </div>
+    </div>
+
+    <!-- Update banner -->
+    <div id="updateBanner" class="update-banner" style="display:none;">
+      <span id="updateBannerText"></span>
+      <span class="update-actions">
+        <button class="btn-link" onclick="openUpdatePage()">Download</button>
+        <button class="btn-icon" onclick="dismissUpdateBanner()" title="Dismiss">&#x2715;</button>
+      </span>
+    </div>
+
+    <!-- About dialog (modal overlay) -->
+    <div id="aboutPanel" class="about-overlay" style="display:none;" onclick="if(event.target===this)hideAboutPanel()">
+      <div class="about-modal">
+        <div class="about-header">
+          <h3>SmartCut</h3>
+          <button class="btn-icon" onclick="hideAboutPanel()">&#x2715;</button>
+        </div>
+        <div id="aboutBody"></div>
+        <div class="about-actions">
+          <button class="btn-ghost" onclick="openPurchasePage()">Buy / Manage</button>
+          <button class="btn-ghost btn-danger" onclick="deactivateLicense()">Deactivate on this Mac</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Panel -->
+    <div id="mainPanel" class="panel" style="display:none;">
+
+      <!-- Sequence + Scope -->
+      <div class="section">
+        <div class="section-header">
+          <h2>Scope</h2>
+          <button class="btn-icon" onclick="refreshScope()" title="Refresh selection">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M23 4v6h-6"/><path d="M1 20v-6h6"/>
+              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+            </svg>
+          </button>
+        </div>
+        <div class="info-card" id="sequenceInfo">
+          <p class="muted">Open a sequence in Premiere Pro</p>
+        </div>
+      </div>
+
+      <!-- Detection Settings -->
+      <div class="section">
+        <div class="section-header">
+          <h2>Cut Style</h2>
+        </div>
+
+        <!-- Preset Buttons -->
+        <div class="preset-bar">
+          <button class="preset-btn" id="preset-shortform" onclick="applyPreset('shortform')"
+                  title="Reels, TikToks, ads. Aggressive cuts (pauses 200ms+), minimal padding, snappy feel.">
+            <span class="preset-icon">&#9889;</span>
+            Short Form
+          </button>
+          <button class="preset-btn" id="preset-podcast" onclick="applyPreset('podcast')"
+                  title="Interviews, long-form. Gentle cuts (pauses 500ms+), preserves natural breathing rhythm.">
+            <span class="preset-icon">&#127911;</span>
+            Podcast
+          </button>
+          <button class="preset-btn" id="preset-custom" onclick="applyPreset('custom')">
+            <svg class="preset-icon-svg" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="4" y1="21" x2="4" y2="14"/>
+              <line x1="4" y1="10" x2="4" y2="3"/>
+              <line x1="12" y1="21" x2="12" y2="12"/>
+              <line x1="12" y1="8" x2="12" y2="3"/>
+              <line x1="20" y1="21" x2="20" y2="16"/>
+              <line x1="20" y1="12" x2="20" y2="3"/>
+              <line x1="1" y1="14" x2="7" y2="14"/>
+              <line x1="9" y1="8" x2="15" y2="8"/>
+              <line x1="17" y1="16" x2="23" y2="16"/>
+            </svg>
+            Custom
+          </button>
+        </div>
+
+        <!-- Optional speech-based cleanup. Kept visible (not in Advanced) because
+             it materially changes what gets cut and how long Analyze takes. -->
+        <label class="toggle-row ai-toggle">
+          <span class="toggle-info">
+            <strong>Remove retakes &amp; false starts</strong>
+          </span>
+          <span class="toggle"><input type="checkbox" id="useTranscription" onchange="onAIToggle()"><span class="toggle-slider"></span></span>
+        </label>
+
+        <!-- Advanced (collapsed by default — all other controls live here) -->
+        <div class="advanced-toggle" onclick="toggleAdvanced()">
+          <span id="advancedChevron">&#9656;</span>
+          <span>Advanced</span>
+        </div>
+        <div id="advancedPanel" class="advanced-panel" style="display:none;">
+
+          <!-- Audio source -->
+          <div class="control-group">
+            <label class="control-label"><span>Audio source</span></label>
+            <select id="audioSourceSelect" class="track-select" onchange="onAnySettingChange()">
+              <option value="auto">Auto (best track in scope)</option>
+            </select>
+          </div>
+
+          <!-- Hidden compat inputs: kept so getSettings() stays valid without
+               polluting the UI. Sensitivity is always 3 (neutral) now — the
+               threshold slider is the one knob that controls aggressiveness. -->
+          <input type="checkbox" id="detectSilence"  checked    style="display:none;">
+          <input type="range"    id="sensitivity"   min="1" max="5" value="3" style="display:none;">
+
+          <!-- Silence Threshold (auto-driven by default — drag to override) -->
+          <div class="control-group">
+            <label class="control-label">
+              <span>Silence threshold</span>
+              <span class="control-value" id="thresholdValue">auto</span>
+            </label>
+            <input type="range" id="threshold" min="-60" max="-15" value="-35" class="threshold-slider"
+              oninput="onThresholdDrag(this.value)">
+            <div class="auto-threshold-info" id="autoThresholdInfo" style="display:none;"></div>
+            <small class="muted" id="thresholdHint" style="margin-top:4px;display:block;">
+              Auto-detected per clip on each Analyze. Drag to lock a fixed value.
+            </small>
+          </div>
+
+          <!-- Min Silence Duration -->
+          <div class="control-group">
+            <label class="control-label">
+              <span>Min silence length</span>
+              <span class="control-value" id="minDurationValue">0.3s</span>
+            </label>
+            <input type="range" id="minDuration" min="100" max="3000" value="300" step="100"
+              oninput="document.getElementById('minDurationValue').textContent=(this.value/1000).toFixed(1)+'s'; onSliderChange()">
+          </div>
+
+          <!-- Padding -->
+          <div class="control-group">
+            <label class="control-label">
+              <span>Padding</span>
+              <span class="control-value" id="paddingValue">120 ms</span>
+            </label>
+            <input type="range" id="padding" min="0" max="300" value="120" step="10"
+              oninput="document.getElementById('paddingValue').textContent=this.value+' ms'; onSliderChange()">
+            <small class="muted" style="margin-top:4px;display:block;">
+              Extra breathing room at the start and end of each kept speech segment.
+            </small>
+          </div>
+
+          <!-- Crossfade -->
+          <div class="control-group">
+            <label class="control-label">
+              <span>Audio crossfade</span>
+              <span class="control-value" id="crossfadeValue">15 ms</span>
+            </label>
+            <input type="range" id="crossfade" min="0" max="50" value="15" step="5"
+              oninput="document.getElementById('crossfadeValue').textContent=this.value+' ms'; onSliderChange()">
+            <small class="muted" style="margin-top:4px;display:block;">
+              Short audio fade at each cut to prevent clicks/pops.
+            </small>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Actions -->
+      <div class="section actions-section">
+        <button class="btn-primary btn-full" id="analyzeBtn" onclick="analyzeSequence()">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
+          </svg>
+          Analyze &amp; Preview
+        </button>
+      </div>
+
+      <!-- Error / diagnostics output (shown only when something fails) -->
+      <pre id="diagPanel" class="diag-panel" style="display:none;"></pre>
+
+      <!-- Progress -->
+      <div class="section" id="progressSection" style="display:none;">
+        <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+        <span class="progress-text" id="progressText">Analyzing audio…</span>
+      </div>
+
+      <!-- Results -->
+      <div class="section" id="resultsSection" style="display:none;">
+        <div class="section-header">
+          <h2>Results</h2>
+          <button class="btn-icon" onclick="clearResults()" title="Clear">&#x2715;</button>
+        </div>
+        <!-- Hero card: honest numbers. Big time saved, then what's in it. -->
+        <div class="cut-hero" id="cutHero">
+          <div class="cut-hero-top">
+            <span class="cut-hero-number" id="heroSaved">0:00</span>
+            <span class="cut-hero-suffix">saved</span>
+          </div>
+          <div class="cut-hero-meta">
+            <span id="heroBreakdown">0 cuts</span>
+            <span class="cut-hero-dot">&middot;</span>
+            <span id="heroPct">0% tighter</span>
+          </div>
+          <div class="cut-hero-range">
+            <span id="heroBefore">0:00</span>
+            <span class="cut-hero-arrow">&rarr;</span>
+            <span id="heroAfter">0:00</span>
+          </div>
+        </div>
+
+        <!-- Silences sublist -->
+        <div id="silencesSection" style="display:none;">
+          <div class="sublist-header">
+            <span>Silences</span>
+            <span class="sublist-hint" title="Gap &lt; 1s &middot; Pause 1 to 2s &middot; Dead Air &gt; 2s">gap / pause / dead air &middot; by length</span>
+          </div>
+          <div id="silencesList" class="results-list"></div>
+        </div>
+
+        <!-- Bad Takes sublist (transcript excerpts) -->
+        <div id="badTakesSection" style="display:none;">
+          <div class="sublist-header">
+            <span>Bad Takes</span>
+            <span class="sublist-hint">hover any tag for details</span>
+          </div>
+          <div id="badTakesList" class="results-list"></div>
+        </div>
+
+        <!-- Legacy flat list fallback if we have neither labelled section -->
+        <div id="resultsList" class="results-list"></div>
+
+        <button class="btn-accent btn-full" id="applyBtn" onclick="applyCutsToTimeline()">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="6" cy="7" r="2.5"/>
+            <circle cx="6" cy="17" r="2.5"/>
+            <path d="M8.3 8l13.2 7.6"/>
+            <path d="M8.3 16l13.2-7.6"/>
+          </svg>
+          Apply All Cuts
+        </button>
+        <!-- Appears after a successful apply. Restores the pre-cut sequence
+             that the host cloned into the project bin before razoring. -->
+        <button class="btn-ghost btn-full" id="restoreBtn"
+                onclick="restoreSnapshot()"
+                style="display:none; margin-top:6px;">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px; vertical-align:-2px;">
+            <path d="M9 14L4 9l5-5"/>
+            <path d="M4 9h11a5 5 0 010 10h-3"/>
+          </svg>
+          <span id="restoreBtnLabel">Restore original</span>
+        </button>
+      </div>
+
+    </div>
+
+    <!-- Status Bar -->
+    <footer class="status-bar">
+      <span id="statusText">Ready</span>
+      <span class="status-dot" id="statusDot"></span>
+    </footer>
+
+  </div>
+
+  <script src="lib/CSInterface.js"></script>
+  <script src="lib/License.js"></script>
+  <script src="lib/Updater.js"></script>
+  <script src="lib/AudioAnalyzer.js"></script>
+  <script src="lib/Transcriber.js"></script>
+  <!-- transformers.js bundle (~880KB) populates window.transformers -->
+  <script src="lib/transformers.bundle.js"></script>
+  <script src="lib/Embedder.js"></script>
+  <script src="lib/BadTakeDetector.js"></script>
+  <script src="main.js"></script>
+</body>
+</html>
