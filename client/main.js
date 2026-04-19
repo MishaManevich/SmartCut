@@ -101,7 +101,7 @@ function safeParseJSON(raw) {
 // Bump this string whenever you need to verify the panel is actually running
 // the latest code. It prints once on load and also shows in the title bar of
 // the About dialog.
-var SMARTCUT_PANEL_BUILD = "v9.15-one-clip-at-a-time-2026-04-19";
+var SMARTCUT_PANEL_BUILD = "v9.16-auto-audio-fallback-2026-04-19";
 
 document.addEventListener("DOMContentLoaded", function () {
   console.log("[SmartCut] panel build:", SMARTCUT_PANEL_BUILD);
@@ -1873,10 +1873,10 @@ function applyCutsToTimeline() {
     return;
   }
 
-  // v9.15: hard guards. We refuse to apply unless the resolver returned
-  // both exactly one video track AND at least one linked audio track. No
-  // silent "cut video only" fallback — that produced out-of-sync material
-  // and users couldn't tell what was getting hit until after the damage.
+  // v9.16: keep the guards minimal. The resolver auto-falls back to the
+  // detected audio source when no formal link exists, so video-only cuts
+  // are now rare. We still bail on the obvious mistakes (no clip selected,
+  // multi-video selection that we can't disambiguate).
   var tt = analysisResult.targetTracks;
   if (!tt || !tt.video || tt.video.length === 0) {
     status("No video clip selected. Click a clip on the timeline and re-analyze.");
@@ -1887,14 +1887,11 @@ function applyCutsToTimeline() {
     return;
   }
   if (!tt.audio || tt.audio.length === 0) {
-    window.alert(
-      "This video clip isn't linked to any audio track.\n\n" +
-      "To cut video and audio together, select both clips in Premiere's " +
-      "timeline and run Clip > Link. Then click Analyze again.\n\n" +
-      "SmartCut refuses to cut video alone so your tracks stay in sync."
-    );
-    status("Blocked: link your video + audio first, then re-analyze.");
-    return;
+    // No linked audio AND no auto-detected audio source overlaps the clip.
+    // Almost always means the clip is genuinely video-only (b-roll, title,
+    // graphic). Let it through with a short notice — no scary modal.
+    console.warn("[SmartCut] no audio target — cutting video only");
+    status("Cutting video only (no audio detected for this clip)\u2026");
   }
 
   var trackIndex = (typeof analysisResult.primaryVideoTrackIdx === "number")

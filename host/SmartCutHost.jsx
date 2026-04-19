@@ -881,10 +881,35 @@ function resolveAnalysisPlan(payloadJSON) {
 
     // v9.9: figure out which tracks the cut phase should actually touch.
     // Derived from the current selection + each selected clip's linked
-    // items. Null means "no selection → no restriction". The client passes
-    // this straight back into applyCuts() so PHASE 1/2 can skip untouched
-    // tracks.
+    // items.
     var targetTracks = resolveTargetTracksFromSelection(seq);
+
+    // v9.16: if the resolver couldn't find any LINKED audio (Premiere
+    // reported zero linked items, or the linked clips had < 50% overlap),
+    // fall back to the audio track we just auto-detected as the source.
+    // The user's intent is "cut the audio I see right next to my video",
+    // and the auto-detected track is exactly that — the audio we already
+    // analyzed for silence. Skipping this fallback was producing the
+    // "this clip isn't linked" alert even when V2 + A2 were obviously
+    // paired but not formally linked.
+    //
+    // We only do this when the auto-detected source is an actual audio
+    // track (not "video" embedded). For embedded audio there's nothing
+    // separate to cut anyway.
+    if (targetTracks && targetTracks.video && targetTracks.video.length &&
+        (!targetTracks.audio || targetTracks.audio.length === 0) &&
+        audioKind === "audio") {
+      // Verify the auto-detected track has clips overlapping the scope.
+      var autoTrack = seq.audioTracks[audioTrackIndex];
+      var autoCov = autoTrack ? trackCoverageWithin(autoTrack, startSec, endSec) : 0;
+      if (autoCov > 0.1) {
+        targetTracks.audio = [audioTrackIndex];
+        if (targetTracks.trace) {
+          targetTracks.trace += " | fallback: A" + (audioTrackIndex + 1) +
+            " (auto-detected source, cov=" + autoCov.toFixed(2) + "s)";
+        }
+      }
+    }
 
     return jsonStringify({
       ok: true,
@@ -942,7 +967,7 @@ function resolveAnalysisPlan(payloadJSON) {
 
 function applyCuts(payloadJSON) {
   logInit();
-  log("applyCuts() v9.15 - one clip at a time, strict target enforcement");
+  log("applyCuts() v9.16 - auto-detected audio fallback when no link present");
   log("Premiere version: " + (app.version || "unknown"));
 
   try {
