@@ -10,11 +10,23 @@
   --text-primary: #e0e0e0;
   --text-secondary: #999999;
   --text-muted: #666666;
-  --cyan: #00d4aa;
-  --cyan-dim: rgba(0, 212, 170, 0.15);
-  --cyan-hover: #00e8bb;
+
+  /* Brand accent: SmartCut orange.
+     The variable names below are kept (--cyan, --cyan-dim, --cyan-hover)
+     so we don't have to touch 50+ selectors, but the VALUES are now orange
+     to stay in lockstep with the trysmartcut.com landing page + OG image.
+     Do NOT rename these — just update the hex here if the brand shifts. */
+  --brand:        #f97316;
+  --brand-hover:  #fb923c;
+  --brand-deep:   #ea580c;
+  --brand-dim:    rgba(249, 115, 22, 0.15);
+
+  --cyan:         var(--brand);
+  --cyan-hover:   var(--brand-hover);
+  --cyan-dim:     var(--brand-dim);
+
   --amber: #f5a623;
-  --red: #e74c3c;
+  --red:   #e74c3c;
   --green: #27ae60;
   --radius: 6px;
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -419,7 +431,7 @@ body {
 }
 
 .preset-btn.active:hover {
-  background: rgba(0, 212, 170, 0.22);
+  background: rgba(249, 115, 22, 0.22);
 }
 
 .preset-icon {
@@ -570,7 +582,7 @@ input[type="range"]::-webkit-slider-thumb:hover { background: var(--cyan-hover);
 }
 
 .btn-auto.active:hover {
-  background: rgba(0, 212, 170, 0.22);
+  background: rgba(249, 115, 22, 0.22);
 }
 
 .auto-threshold-info {
@@ -634,7 +646,7 @@ input[type="range"]::-webkit-slider-thumb:hover { background: var(--cyan-hover);
 .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .btn-accent {
-  background: linear-gradient(135deg, var(--cyan), #00b894);
+  background: linear-gradient(135deg, var(--brand), var(--brand-deep));
   color: #0a0a0a;
   font-weight: 600;
   padding: 10px 16px;
@@ -684,6 +696,32 @@ input[type="range"]::-webkit-slider-thumb:hover { background: var(--cyan-hover);
 
 .error-text { color: var(--red); font-size: 11px; }
 
+/* ─── Smooth section hide ──────────────────────────────────────────────────
+ *
+ * Applied by smoothHide() in main.js when a section (progress, results,
+ * diag card) collapses away. Fades opacity, tucks up slightly, and squeezes
+ * max-height to zero so everything below the section glides up to fill the
+ * space instead of popping. The companion JS removes the element from the
+ * layout (display:none) after the transition finishes.
+ */
+.is-collapsing {
+  pointer-events: none;
+  opacity: 0 !important;
+  transform: translateY(-4px);
+  max-height: 0 !important;
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  overflow: hidden !important;
+  transition:
+    opacity 220ms ease,
+    transform 220ms ease,
+    max-height 260ms ease,
+    margin 260ms ease,
+    padding 260ms ease;
+}
+
 /* Progress */
 .progress-bar {
   width: 100%;
@@ -696,7 +734,7 @@ input[type="range"]::-webkit-slider-thumb:hover { background: var(--cyan-hover);
 
 .progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, var(--cyan), #00b894);
+  background: linear-gradient(90deg, var(--brand), var(--brand-deep));
   border-radius: 2px;
   width: 0%;
   transition: width 0.3s;
@@ -1138,7 +1176,7 @@ input[type="range"]::-webkit-slider-thumb:hover { background: var(--cyan-hover);
   gap: 10px;
   margin: 8px 14px 0;
   padding: 8px 12px;
-  background: rgba(0, 212, 170, 0.08);
+  background: rgba(249, 115, 22, 0.08);
   border: 1px solid var(--cyan-dim);
   border-radius: var(--radius);
   font-size: 11px;

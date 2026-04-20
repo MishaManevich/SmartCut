@@ -213,9 +213,9 @@ Your source has multiple clips sharing the same bounds. File an issue with the `
 - [ ] Run **Test Cut** on a fresh project → must return `SUCCESS`.
 - [ ] Run full analyze+apply on a 3-minute MOV → should cut 5–15 silences without complaints.
 - [ ] Verify `autoThreshold` populates the noise-floor info card.
-- [ ] Deploy the license worker (see `tools/license-worker/README.md`).
-- [ ] Update `client/lib/License.js → BACKEND_BASE` and `CHECKOUT_URL`.
-- [ ] Create your Paddle product + checkout page; pass `custom_data.license_key` on each checkout.
+- [ ] Deploy the license worker (see `tools/license-worker/README.md` and `STRIPE-SETUP.md`).
+- [ ] Update `client/lib/License.js → BACKEND_BASE`, `PRICING_URL`, and the three `CHECKOUT_LINKS`.
+- [ ] Create Stripe products + Payment Links for monthly / annual / lifetime.
 - [ ] Build and sign the `.zxp` (`npm run build:zxp`) and upload to R2.
 - [ ] POST to `/admin/release` to publish the version.
 
@@ -225,21 +225,26 @@ Your source has multiple clips sharing the same bounds. File an issue with the `
 
 SmartCut ships with a small Cloudflare Worker that:
 
-- Listens for **Paddle** webhooks (so license keys land in KV automatically at purchase / refund / cancel time).
+- Listens for **Stripe** webhooks so license keys land in KV automatically at checkout, renewal, cancel, and refund.
+- Emails the license key to the buyer via Resend right after purchase.
 - Verifies `POST /verify` calls from the panel (machine-bound activation with a cap).
-- Hands the panel a short-lived **signed download URL** for the latest `.zxp`
-  when it asks `POST /download-url` — and only if the caller has an active license.
-  That means unpaid users can never download the installer, even if they find the API.
+- Hands the panel a short-lived **signed download URL** for the latest `.zxp` via `POST /download-url` — license-gated, so unpaid users can never grab the installer.
+- Mints one-click **Stripe Billing Portal** sessions via `POST /portal-url` so "Manage subscription" in the panel opens straight into the user's account.
 
-The full setup (KV namespace, R2 bucket, Paddle webhook wiring, admin release flow) is in
-[`tools/license-worker/README.md`](tools/license-worker/README.md).
+Pricing (launch):
 
-### Why a backend and not Paddle-direct
+| Plan     | Price           |
+|----------|-----------------|
+| Monthly  | $29.99/mo       |
+| Annual   | $199/year       |
+| Lifetime | $49 one-time    |
 
-Paddle Billing's license keys are designed around webhooks + your own store.
-Doing the verification in a tiny worker has three advantages over hitting a
-payment provider from the panel:
+Full setup (KV, R2, Stripe Dashboard, webhook, Payment Links, billing portal) is in [`tools/license-worker/STRIPE-SETUP.md`](tools/license-worker/STRIPE-SETUP.md).
 
-1. You can swap providers later (Paddle → Stripe → ???) without shipping a new CEP release.
-2. You can gate the **download URL** the same way — no unpaid leak of the `.zxp`.
-3. You control the activation limit, offline grace, deactivate flow, and refund handling in one place.
+### Why a Worker and not Stripe-direct
+
+Hitting Stripe directly from the panel would leak the download URL and make payment-provider swaps painful. The Worker gives us:
+
+1. **Gated downloads** — only active licenses get a signed URL to the `.zxp`.
+2. **Provider portability** — swap Stripe for anything else by replacing one handler, no CEP re-release.
+3. **One place** for activation caps, offline grace, deactivate flow, refund handling, comp grants.

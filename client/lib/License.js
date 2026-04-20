@@ -1,65 +1,80 @@
 /**
- * SmartCut — License module (Paddle-backed, via our own backend)
+ * SmartCut — License module (Stripe-backed, via our own backend)
  *
- * ─── Why a backend? ──────────────────────────────────────────────────────────
- * We used to point the panel at a payment provider's public verify endpoint
- * (Gumroad). That was simple but tightly coupled the client to one provider
- * and — more importantly — left release-download URLs publicly reachable. If
- * you switch payment providers (Paddle → Stripe, etc) the client has to be
- * re-released.
+ * ─── Architecture ───────────────────────────────────────────────────────────
+ *    Premiere panel  →  Cloudflare Worker  →  Stripe API / KV
  *
- * The right shape for a paid CEP/Electron app is:
+ *    - Stripe Checkout (Payment Links) collects payment on trysmartcut.com
+ *    - Stripe webhooks → our Worker → KV (license records)
+ *    - Worker emails the newly minted license key to the buyer (Resend)
+ *    - Panel calls POST /verify        to activate & revalidate
+ *    - Panel calls POST /download-url  to get a short-lived signed URL to
+ *                                      the latest .zxp in R2
+ *    - Panel calls POST /portal-url    to open the Stripe Billing Portal
+ *                                      (cancel, change card, switch plan)
  *
- *    Premiere panel  →  your backend  →  Paddle API / database
+ * See `tools/license-worker/` for the Worker and STRIPE-SETUP.md for the
+ * one-time Stripe Dashboard configuration.
  *
- *    - Paddle webhooks ingest purchases and refunds into the backend
- *    - Backend stores { licenseKey, email, transactionId, machineIds[],
- *      status, expiresAt }
- *    - Panel calls POST <BACKEND>/verify to activate & revalidate
- *    - Panel calls POST <BACKEND>/download-url to get a signed, short-lived
- *      URL to the latest .zxp — so unpaid users can never grab the binary
+ * ─── Pricing ───────────────────────────────────────────────────────────────
+ *   Monthly  — $29.99/mo
+ *   Annual   — $199/year     (~45% vs monthly)
+ *   Lifetime — $49 one-time  (launch special)
  *
- * See `tools/license-worker/` for a reference Cloudflare Worker that
- * implements the whole contract.
+ * ─── Protocol (backend ↔ client) ───────────────────────────────────────────
+ *   POST /verify
+ *     Body:    { licenseKey, machineId, machineMeta, activation, app }
+ *     Returns: { ok, kind, email, plan, activationsUsed, activationsMax,
+ *                expiresAt } | { ok:false, reason, message }
  *
- * ─── Protocol (backend ↔ client) ─────────────────────────────────────────────
- * Both endpoints accept JSON and return JSON.
+ *   POST /download-url
+ *     Body:    { licenseKey, machineId, platform }
+ *     Returns: { ok, url, version, expiresAt } | { ok:false, reason, message }
  *
- *   POST <BACKEND>/verify
- *   Body:    { licenseKey, machineId, machineMeta: { hostname, cpu }, app: { version, os } }
- *   Returns: { ok: true,  kind: "full",  email, activationsUsed, activationsMax, expiresAt }
- *            { ok: false, reason, message }
- *
- *   POST <BACKEND>/download-url
- *   Body:    { licenseKey, machineId }
- *   Returns: { ok: true, url, expiresAt, version }
- *            { ok: false, reason, message }
- *
- * The backend verifies the key exists, isn't refunded/chargebacked, and that
- * the machine is already activated (or under the activation cap). The
- * license key is the one Paddle returns to the customer after checkout.
+ *   POST /portal-url
+ *     Body:    { licenseKey, machineId }
+ *     Returns: { ok, url } | { ok:false, reason, message }
  */
 (function (global) {
   "use strict";
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // CONFIG — edit these two values before shipping
+  // CONFIG — edit these URLs before shipping (see STRIPE-SETUP.md)
   // ═══════════════════════════════════════════════════════════════════════════
   //
-  // BACKEND_BASE: your deployed license server (Cloudflare Worker / Vercel /
-  // Fly / Render — anything that speaks HTTPS). See tools/license-worker/.
+  // BACKEND_BASE: your deployed Cloudflare Worker.
   //
-  // CHECKOUT_URL: your Paddle product checkout link. Paddle delivers the
-  // license key to the customer's email after purchase.
+  // PRICING_URL:  public pricing page (trysmartcut.com/pricing). This is where
+  //               "Buy" / "Upgrade" buttons in the extension open to — users
+  //               see all three plans side-by-side and pick one.
+  //
+  // CHECKOUT_LINKS: direct Stripe Payment Link URLs per plan. The in-panel
+  //                "Upgrade" dialog can jump straight into one of these, so
+  //                users who already know which plan they want skip the
+  //                pricing page. Leave any as empty string to hide that
+  //                plan in the dialog.
+  //
+  // MANAGE_URL:   fallback used for lifetime buyers (no sub portal). For
+  //               subscribers we mint a one-click Portal Session via the
+  //               backend (requestPortalUrl), so this fallback only opens
+  //               when that request fails.
   // ═══════════════════════════════════════════════════════════════════════════
 
-  var BACKEND_BASE = "https://license.smartcutpro.app"; // ← CHANGE ME
-  var CHECKOUT_URL = "https://pay.smartcutpro.app/checkout"; // ← CHANGE ME (Paddle checkout URL)
-  // Paddle customer portal URL — where paying customers go to cancel,
-  // update card, change plan, download invoices. Paddle gives you a
-  // per-product portal link in the dashboard. Falls back to CHECKOUT_URL
-  // if not configured.
-  var MANAGE_URL   = "https://pay.smartcutpro.app/account"; // ← CHANGE ME (Paddle customer portal URL)
+  var BACKEND_BASE    = "https://license.trysmartcut.com";        // ← CHANGE ME
+  var PRICING_URL     = "https://trysmartcut.com/pricing";        // ← CHANGE ME
+  var CHECKOUT_LINKS  = {
+    monthly:  "https://buy.stripe.com/REPLACE_WITH_MONTHLY_LINK",  // ← CHANGE ME
+    annual:   "https://buy.stripe.com/REPLACE_WITH_ANNUAL_LINK",   // ← CHANGE ME
+    lifetime: "https://buy.stripe.com/REPLACE_WITH_LIFETIME_LINK"  // ← CHANGE ME
+  };
+  var MANAGE_URL      = "mailto:support@trysmartcut.com";         // fallback only
+
+  // Human-readable plan catalog for UI (kept in sync with Stripe prices).
+  var PLANS = {
+    monthly:  { label: "Monthly",  price: "$29.99/mo",      tagline: "Cancel anytime" },
+    annual:   { label: "Annual",   price: "$199/year",      tagline: "Save ~45% vs monthly" },
+    lifetime: { label: "Lifetime", price: "$49 (launch)",   tagline: "One-time payment, forever" }
+  };
 
   // Dev master keys — activate locally without touching the backend. Remove
   // or leave intact before shipping; they're only useful while BACKEND_BASE
@@ -173,11 +188,24 @@
 
   // ─── Public API ───────────────────────────────────────────────────────────
   var License = {
-    BUY_URL:         CHECKOUT_URL,
-    MANAGE_URL:      MANAGE_URL,
+    // Main pricing page — all three plans live there. Used by the "Buy"
+    // buttons. In-panel dialogs can also deep-link into CHECKOUT_LINKS
+    // directly (see openCheckout below).
+    BUY_URL:         PRICING_URL,
+    PRICING_URL:     PRICING_URL,
+    CHECKOUT_LINKS:  CHECKOUT_LINKS,
+    PLANS:           PLANS,
+    MANAGE_URL:      MANAGE_URL,      // lifetime fallback
     BACKEND_BASE:    BACKEND_BASE,
     TRIAL_DAYS:      TRIAL_DAYS,
     TRIAL_MAX_EDITS: TRIAL_MAX_EDITS,
+
+    // Resolve a Payment Link URL for a given plan, falling back to the
+    // pricing page if that plan isn't configured.
+    checkoutUrlFor: function (plan) {
+      var link = CHECKOUT_LINKS && CHECKOUT_LINKS[plan];
+      return (link && link.indexOf("REPLACE_WITH") === -1) ? link : PRICING_URL;
+    },
 
     check: function () {
       var env = loadEnvelope();
@@ -394,6 +422,31 @@
       }).catch(function (err) {
         return { ok: false, reason: "network",
           message: "Could not reach update server: " + (err.message || err) };
+      });
+    },
+
+    // Ask the backend for a one-time Stripe Billing Portal URL bound to
+    // this license's customer_id. The panel opens it in the system
+    // browser so the user can cancel, change card, switch plan, etc.
+    // Lifetime licenses don't have a portal — the server returns
+    // { ok: false, reason: "no_subscription" } and the UI should fall
+    // back to MANAGE_URL (a mailto).
+    requestPortalUrl: function () {
+      var env = loadEnvelope();
+      if (!env || env.kind !== "full" || !env.key) {
+        return Promise.resolve({ ok: false, reason: "no_license",
+          message: "No active license to manage." });
+      }
+      if (env.isDev) {
+        return Promise.resolve({ ok: false, reason: "dev_license",
+          message: "Dev licenses don't have a billing portal." });
+      }
+      return postJSON("/portal-url", {
+        licenseKey: env.key,
+        machineId:  getMachineId()
+      }).catch(function (err) {
+        return { ok: false, reason: "network",
+          message: "Could not reach license server: " + (err.message || err) };
       });
     }
   };

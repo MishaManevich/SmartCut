@@ -42,7 +42,7 @@
     if (global.License && global.License.BACKEND_BASE) {
       return global.License.BACKEND_BASE;
     }
-    return "https://license.smartcutpro.app"; // ← fallback, edit to taste
+    return "https://license.trysmartcut.com"; // ← fallback, edit to taste
   }
 
   function getCurrentVersion() {

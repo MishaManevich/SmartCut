@@ -157,7 +157,7 @@ function checkLicense() {
   if (result.ok) {
     showMain();
     if (result.kind === "full") {
-      badge("Active", "#00d4aa");
+      badge("Active", "#f97316");
     } else {
       badge("Active Trial", "#f5a623");
     }
@@ -191,7 +191,7 @@ function activateLicense() {
       return;
     }
     showMain();
-    badge("Active", "#00d4aa");
+    badge("Active", "#f97316");
     status("License activated" + (res.email ? " \u00b7 " + res.email : ""));
   });
 }
@@ -243,17 +243,48 @@ function badge(t, c) {
   b.onclick = showAboutPanel;
 }
 
+// Open the main pricing page (trysmartcut.com/pricing) where all three plans
+// are laid out. Used by the "Upgrade" / "Buy" buttons when the user hasn't
+// picked a plan yet.
 function openPurchasePage() {
   if (window.License && window.Updater) {
-    Updater.openReleasePage(License.BUY_URL);
+    Updater.openReleasePage(License.BUY_URL || License.PRICING_URL);
   }
 }
 
+// Deep-link straight into one of the three Stripe Payment Links. Handy for
+// in-panel upgrade buttons that already know which plan the user picked
+// (e.g., "Upgrade to Annual" from a prompt). Unknown/unconfigured plans
+// fall back to the pricing page.
+function openCheckoutFor(plan) {
+  if (!window.License || !window.Updater) return;
+  var url = License.checkoutUrlFor ? License.checkoutUrlFor(plan)
+                                   : (License.PRICING_URL || License.BUY_URL);
+  Updater.openReleasePage(url);
+}
+
+// "Manage subscription" — for Stripe subscribers we mint a one-click
+// Billing Portal session on the backend and open it in the browser. Users
+// don't have to re-auth, don't have to look up an email link, and they
+// land in the portal within ~200ms of clicking. Lifetime buyers (no sub)
+// and errors fall back to License.MANAGE_URL (mailto).
 function openManagePage() {
-  if (window.License && window.Updater) {
-    var url = License.MANAGE_URL || License.BUY_URL;
-    Updater.openReleasePage(url);
-  }
+  if (!window.License || !window.Updater) return;
+
+  // Hand the user a fast "Opening…" status so they know the click
+  // registered while we wait on the portal API roundtrip.
+  try { status("Opening billing portal…"); } catch (e) {}
+
+  License.requestPortalUrl().then(function (res) {
+    if (res && res.ok && res.url) {
+      Updater.openReleasePage(res.url);
+      return;
+    }
+    // No sub (lifetime) or network error → fall back.
+    Updater.openReleasePage(License.MANAGE_URL || License.PRICING_URL || License.BUY_URL);
+  }).catch(function () {
+    Updater.openReleasePage(License.MANAGE_URL || License.PRICING_URL || License.BUY_URL);
+  });
 }
 
 function copyMachineIdToClipboard() {
@@ -512,8 +543,7 @@ function applyScopeInfo(info, opts) {
     if (analyzedFp && currentFp && analyzedFp !== currentFp) {
           dbg("[SmartCut] selection changed — clearing stale results",
               "analyzed=", analyzedFp, "current=", currentFp);
-      var resSec = document.getElementById("resultsSection");
-      if (resSec) resSec.style.display = "none";
+      smoothHide("resultsSection");
       analysisResult = null;
       selectedRegions = {};
       clearSnapshot();
@@ -1571,6 +1601,11 @@ function showResults(data) {
     return;
   }
   var section = document.getElementById("resultsSection");
+  // Nuke any leftover collapse styles if the section was mid-smoothHide
+  // (e.g. user races Analyze before the fade finishes).
+  section.classList.remove("is-collapsing");
+  section.style.maxHeight = "";
+  section.style.transform = "";
   section.style.display = "block";
 
   // A fresh analysis invalidates any snapshot from the previous apply — the
@@ -2083,7 +2118,9 @@ function runApplyCuts(regions, trackIndex, s, scope, targetTracks) {
       hideRestoreButton();
     }
 
-    if (!res.success || (res.removeErrors && res.removeErrors.length)) {
+    var fullySucceeded = !!res.success && !(res.removeErrors && res.removeErrors.length);
+
+    if (!fullySucceeded) {
       var diag = [
         "=== Apply Cuts ===",
         "Method: "       + (res.method || "unknown"),
@@ -2102,22 +2139,45 @@ function runApplyCuts(regions, trackIndex, s, scope, targetTracks) {
         diag.push("", "--- Host Log ---", Array.isArray(res.log) ? res.log.join("\n") : res.log);
       diag.push("", "Build: " + SMARTCUT_PANEL_BUILD);
 
-      var fullySucceeded = !!res.success && !(res.removeErrors && res.removeErrors.length);
-      if (fullySucceeded) {
-        // success path shouldn't reach here, but guard just in case
-        hideDiagPanel();
-      } else {
-        showErrorCard(
-          "Cuts applied with issues",
-          "Most of the edits landed, but SmartCut couldn't remove every region " +
-          "cleanly. Review the timeline and click Restore original if you want " +
-          "to roll back.",
-          diag.join("\n")
-        );
-      }
+      showErrorCard(
+        "Cuts applied with issues",
+        "Most of the edits landed, but SmartCut couldn't remove every region " +
+        "cleanly. Review the timeline and click Restore original if you want " +
+        "to roll back.",
+        diag.join("\n")
+      );
+      return;
     }
+
+    // ─── Graceful post-apply reset ──────────────────────────────────────────
+    //
+    // On a fully clean apply we let the user savor the "✓ Applied N cuts"
+    // status for a brief beat, then smooth-fade the stale regions list and
+    // progress bar away so the panel returns to its idle state — ready for
+    // the next clip. Without this the old pauses/bad-takes list just sits
+    // there with checkmarks, which felt jarring.
+    scheduleApplyReset();
   });
 }
+
+// Pull a successful Apply flow back to the idle state: hide the results
+// list + progress bar with a fade, clear the analysis state, and refresh
+// the scope card. The timer is intentionally short — long enough to read
+// the "✓ Applied X cuts" status, short enough that power users don't have
+// to wait to queue up the next clip.
+function scheduleApplyReset() {
+  if (_applyResetTimer) clearTimeout(_applyResetTimer);
+  _applyResetTimer = setTimeout(function () {
+    _applyResetTimer = null;
+    smoothHide("progressSection");
+    smoothHide("resultsSection", function () {
+      analysisResult  = null;
+      selectedRegions = {};
+      try { refreshScope(); } catch (e) {}
+    });
+  }, 900);
+}
+var _applyResetTimer = null;
 
 // ─── Error card ─────────────────────────────────────────────────────────────
 //
@@ -2277,8 +2337,8 @@ function restoreSnapshot() {
     status("\u21BA Restored original sequence");
     clearSnapshot();
     // The cut-up timeline is no longer active, so results on screen are
-    // stale. Clear them and the user can re-analyze the original.
-    document.getElementById("resultsSection").style.display = "none";
+    // stale. Smooth-fade them out and the user can re-analyze the original.
+    smoothHide("resultsSection");
     analysisResult = null;
     selectedRegions = {};
     refreshScope();
@@ -2292,12 +2352,52 @@ function preview(t) {
 }
 
 function clearResults() {
-  document.getElementById("resultsSection").style.display = "none";
+  smoothHide("resultsSection");
   analysisResult = null;
   selectedRegions = {};
   clearSnapshot();
   hideDiagPanel();
   status("Cleared");
+}
+
+// ─── smoothHide ─────────────────────────────────────────────────────────────
+//
+// Collapses a section away with a fade + slide + height squeeze instead of
+// the default hard `display:none` snap. Used by clearResults, the v9.17
+// auto-clear on selection change, the Restore flow, and the post-apply
+// auto-reset so the panel gracefully returns to its idle state.
+//
+// Targets CSS's `.is-collapsing` class. We lock the current max-height
+// first so the transition has something concrete to animate from — an
+// `auto` max-height doesn't animate, which is why so many folks get
+// "max-height just pops" bugs.
+function smoothHide(idOrEl, onDone) {
+  var el = (typeof idOrEl === "string") ? document.getElementById(idOrEl) : idOrEl;
+  if (!el) return;
+  if (el.style.display === "none") { if (onDone) onDone(); return; }
+  if (el.classList.contains("is-collapsing")) return; // already collapsing
+
+  var h = el.getBoundingClientRect().height;
+  el.style.maxHeight = h + "px";
+
+  // Let the browser commit the max-height before we transition.
+  requestAnimationFrame(function () {
+    el.classList.add("is-collapsing");
+    var finished = false;
+    var finish = function () {
+      if (finished) return;
+      finished = true;
+      el.style.display = "none";
+      el.classList.remove("is-collapsing");
+      el.style.maxHeight = "";
+      el.style.transform = "";
+      if (onDone) try { onDone(); } catch (e) {}
+    };
+    el.addEventListener("transitionend", finish, { once: true });
+    // Safety net in case transitionend never fires (e.g. reduced motion,
+    // element detached mid-transition).
+    setTimeout(finish, 360);
+  });
 }
 
 function setProcessing(on) {
@@ -2308,11 +2408,15 @@ function setProcessing(on) {
     btn.disabled = true;
     btn.innerHTML = '<svg class="spin" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg> Analyzing…';
     dot.className = "status-dot processing";
-    document.getElementById("progressSection").style.display = "block";
+    var _ps = document.getElementById("progressSection");
+    _ps.classList.remove("is-collapsing");
+    _ps.style.maxHeight = "";
+    _ps.style.transform = "";
+    _ps.style.display = "block";
   } else {
     btn.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg> Analyze &amp; Preview';
     dot.className = "status-dot";
-    document.getElementById("progressSection").style.display = "none";
+    smoothHide("progressSection");
     // Refresh disabled-state against the current scope.
     syncAnalyzeButtonState();
   }
@@ -2336,6 +2440,10 @@ function syncAnalyzeButtonState() {
 function progress(pct, txt) {
   var sec = document.getElementById("progressSection");
   var justRevealed = sec.style.display === "none";
+  // Shake off any residual smoothHide state so the reveal is instant.
+  sec.classList.remove("is-collapsing");
+  sec.style.maxHeight = "";
+  sec.style.transform = "";
   sec.style.display = "block";
   document.getElementById("progressFill").style.width = pct + "%";
   document.getElementById("progressText").textContent = txt || "Processing…";

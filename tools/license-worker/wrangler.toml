@@ -1,4 +1,4 @@
-name = "smartcutpro-license"
+name = "smartcut-license"
 main = "src/index.js"
 compatibility_date = "2025-12-01"
 
@@ -10,24 +10,52 @@ binding = "LICENSES"
 id = "REPLACE_WITH_KV_ID"
 
 # R2 bucket for hosting signed .zxp downloads. Run:
-#   wrangler r2 bucket create smartcutpro-releases
-# then upload your .zxp files with:
-#   wrangler r2 object put smartcutpro-releases/SmartCutPro-1.0.0.zxp --file ./dist/...
+#   wrangler r2 bucket create smartcut-releases
+# Upload builds with:
+#   wrangler r2 object put smartcut-releases/SmartCut-1.0.0-mac.zxp --file ./dist/...
 [[r2_buckets]]
 binding = "RELEASES"
-bucket_name = "smartcutpro-releases"
+bucket_name = "smartcut-releases"
 
-# Secrets — set via `wrangler secret put <NAME>`:
-#   PADDLE_WEBHOOK_SECRET   (Paddle notification signing secret)
-#   PADDLE_API_KEY          (Paddle API key, server-side)
-#   DOWNLOAD_SIGNING_KEY    (any random 32+ char string, used to sign URLs)
-#   ADMIN_TOKEN             (Bearer token for POSTing new release versions)
+# ─── Secrets — set via `wrangler secret put <NAME>` ────────────────────────
+# STRIPE_SECRET_KEY         Stripe secret key (sk_live_… or sk_test_…)
+# STRIPE_WEBHOOK_SECRET     Endpoint signing secret shown when you create
+#                           the /webhook/stripe endpoint in Dashboard
+# DOWNLOAD_SIGNING_KEY      Any random 32+ char string (signs ZXP URLs)
+# ADMIN_TOKEN               Bearer token for /admin/* routes
+# RESEND_API_KEY            Optional — enables license-key emails on purchase
+# ───────────────────────────────────────────────────────────────────────────
 
 [vars]
 ACTIVATIONS_MAX      = "3"
-DOWNLOAD_URL_TTL_SEC = "600"    # 10 minutes
-# Current distributable version. Bump this each release + re-upload the .zxp
-# to R2 before setting. Client's `GET /latest-version` reads this.
+DOWNLOAD_URL_TTL_SEC = "600"
+
+# ─── Stripe price IDs ──────────────────────────────────────────────────────
+# Fill in after creating the three Products in the Stripe Dashboard.
+# The webhook uses these to tell which plan a buyer picked.
+#   Monthly : $29.99/mo   recurring
+#   Annual  : $199/yr     recurring
+#   Lifetime: $49         one-time (launch special)
+STRIPE_PRICE_MONTHLY  = "price_1TO7JlDyr8pwlym5YneEuQk3"
+STRIPE_PRICE_ANNUAL   = "price_1TO7LUDyr8pwlym5j5yvmWQe"
+STRIPE_PRICE_LIFETIME = "price_1TO7M8Dyr8pwlym5fP1iqkvr"
+
+# Where users land after closing the Billing Portal.
+PORTAL_RETURN_URL    = "https://trysmartcut.com/thanks"
+
+# From address for license-key emails via Resend.
+MAIL_FROM            = "SmartCut <license@trysmartcut.com>"
+
+# Current distributable version. Bump on release, re-upload the .zxp to R2
+# before setting. Client's `GET /latest-version` reads this.
 LATEST_VERSION       = "1.0.0"
-LATEST_NOTES         = "Initial release."
+LATEST_NOTES         = "Initial public release."
 LATEST_RELEASED_AT   = "2026-04-18T00:00:00Z"
+
+# ─── Lifetime launch-window caps ───────────────────────────────────────────
+# The lifetime deal ends when EITHER of these two triggers first.
+# The landing page reads these via /stripe/lifetime-stats and mirrors them.
+# LIFETIME_CAP must match the "Limit number of payments" you set on the
+# Lifetime Payment Link inside the Stripe Dashboard.
+LIFETIME_CAP         = "1000"
+LIFETIME_LAUNCH_END  = "2026-05-09T23:59:59Z"
