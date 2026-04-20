@@ -158,6 +158,12 @@ function checkLicense() {
     showMain();
     if (result.kind === "full") {
       badge("Active", "#f97316");
+      // Silently refresh lastCheckAt in the background if it's been >1 day.
+      // This keeps the OFFLINE_GRACE_DAYS wall invisible for anyone who's
+      // ever online — only true offline streaks ever hit it.
+      if (typeof License.maybeBackgroundRevalidate === "function") {
+        License.maybeBackgroundRevalidate();
+      }
     } else {
       badge("Active Trial", "#f5a623");
     }
@@ -252,10 +258,11 @@ function openPurchasePage() {
   }
 }
 
-// Deep-link straight into one of the three Stripe Payment Links. Handy for
-// in-panel upgrade buttons that already know which plan the user picked
-// (e.g., "Upgrade to Annual" from a prompt). Unknown/unconfigured plans
-// fall back to the pricing page.
+// Deep-link straight into a specific plan on the pricing page (the landing
+// page reads ?plan=<slug> and auto-opens the Paddle overlay for that plan).
+// Handy for in-panel upgrade buttons that already know which plan the user
+// picked (e.g., "Upgrade to Annual" from a prompt). Unknown plans fall back
+// to the generic pricing anchor.
 function openCheckoutFor(plan) {
   if (!window.License || !window.Updater) return;
   var url = License.checkoutUrlFor ? License.checkoutUrlFor(plan)
@@ -263,8 +270,8 @@ function openCheckoutFor(plan) {
   Updater.openReleasePage(url);
 }
 
-// "Manage subscription" — for Stripe subscribers we mint a one-click
-// Billing Portal session on the backend and open it in the browser. Users
+// "Manage subscription" — for Paddle subscribers we mint a one-click
+// Customer Portal session on the backend and open it in the browser. Users
 // don't have to re-auth, don't have to look up an email link, and they
 // land in the portal within ~200ms of clicking. Lifetime buyers (no sub)
 // and errors fall back to License.MANAGE_URL (mailto).

@@ -2,12 +2,12 @@
   "name": "smartcut-license-worker",
   "version": "1.0.0",
   "private": true,
-  "description": "Cloudflare Worker: Stripe webhook ingest + license verify + signed ZXP downloads for SmartCut",
+  "description": "Cloudflare Worker: Paddle webhook ingest + license verify + signed ZXP downloads for SmartCut",
   "scripts": {
     "dev":     "wrangler dev",
     "deploy":  "wrangler deploy",
     "tail":    "wrangler tail",
-    "secrets": "echo 'Run: wrangler secret put STRIPE_SECRET_KEY && wrangler secret put STRIPE_WEBHOOK_SECRET && wrangler secret put DOWNLOAD_SIGNING_KEY && wrangler secret put ADMIN_TOKEN && wrangler secret put RESEND_API_KEY'"
+    "secrets": "echo 'Run: wrangler secret put PADDLE_API_KEY && wrangler secret put PADDLE_WEBHOOK_SECRET && wrangler secret put DOWNLOAD_SIGNING_KEY && wrangler secret put ADMIN_TOKEN && wrangler secret put RESEND_API_KEY'"
   },
   "devDependencies": {
     "wrangler": "^3.90.0"

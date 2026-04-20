@@ -1,20 +1,20 @@
 /**
- * SmartCut — License module (Stripe-backed, via our own backend)
+ * SmartCut — License module (Paddle-backed, via our own backend)
  *
  * ─── Architecture ───────────────────────────────────────────────────────────
- *    Premiere panel  →  Cloudflare Worker  →  Stripe API / KV
+ *    Premiere panel  →  Cloudflare Worker  →  Paddle API / KV
  *
- *    - Stripe Checkout (Payment Links) collects payment on trysmartcut.com
- *    - Stripe webhooks → our Worker → KV (license records)
+ *    - Paddle.js overlay collects payment on trysmartcut.com (MoR)
+ *    - Paddle webhooks → our Worker → KV (license records)
  *    - Worker emails the newly minted license key to the buyer (Resend)
  *    - Panel calls POST /verify        to activate & revalidate
  *    - Panel calls POST /download-url  to get a short-lived signed URL to
  *                                      the latest .zxp in R2
- *    - Panel calls POST /portal-url    to open the Stripe Billing Portal
+ *    - Panel calls POST /portal-url    to open the Paddle Customer Portal
  *                                      (cancel, change card, switch plan)
  *
- * See `tools/license-worker/` for the Worker and STRIPE-SETUP.md for the
- * one-time Stripe Dashboard configuration.
+ * See `tools/license-worker/` for the Worker and PADDLE-SETUP.md for the
+ * one-time Paddle Dashboard configuration.
  *
  * ─── Pricing ───────────────────────────────────────────────────────────────
  *   Monthly  — $29.99/mo
@@ -39,37 +39,31 @@
   "use strict";
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // CONFIG — edit these URLs before shipping (see STRIPE-SETUP.md)
+  // CONFIG — edit these URLs before shipping (see PADDLE-SETUP.md)
   // ═══════════════════════════════════════════════════════════════════════════
   //
   // BACKEND_BASE: your deployed Cloudflare Worker.
   //
-  // PRICING_URL:  public pricing page (trysmartcut.com/pricing). This is where
-  //               "Buy" / "Upgrade" buttons in the extension open to — users
-  //               see all three plans side-by-side and pick one.
+  // PRICING_URL:  public pricing page on trysmartcut.com. "Upgrade" buttons
+  //               in the extension open this in the system browser — the
+  //               landing page then fires the Paddle.js overlay when the
+  //               user picks a plan. We can't trigger the overlay from
+  //               inside Premiere's CEP panel, so all in-extension purchase
+  //               buttons route through here.
   //
-  // CHECKOUT_LINKS: direct Stripe Payment Link URLs per plan. The in-panel
-  //                "Upgrade" dialog can jump straight into one of these, so
-  //                users who already know which plan they want skip the
-  //                pricing page. Leave any as empty string to hide that
-  //                plan in the dialog.
-  //
-  // MANAGE_URL:   fallback used for lifetime buyers (no sub portal). For
-  //               subscribers we mint a one-click Portal Session via the
-  //               backend (requestPortalUrl), so this fallback only opens
-  //               when that request fails.
+  // MANAGE_URL:   fallback used for lifetime buyers (no sub portal) and for
+  //               errors. For subscribers we mint a one-click Paddle
+  //               Customer Portal session via the backend (requestPortalUrl).
   // ═══════════════════════════════════════════════════════════════════════════
 
-  var BACKEND_BASE    = "https://license.trysmartcut.com";        // ← CHANGE ME
-  var PRICING_URL     = "https://trysmartcut.com/pricing";        // ← CHANGE ME
-  var CHECKOUT_LINKS  = {
-    monthly:  "https://buy.stripe.com/REPLACE_WITH_MONTHLY_LINK",  // ← CHANGE ME
-    annual:   "https://buy.stripe.com/REPLACE_WITH_ANNUAL_LINK",   // ← CHANGE ME
-    lifetime: "https://buy.stripe.com/REPLACE_WITH_LIFETIME_LINK"  // ← CHANGE ME
-  };
+  // Using the workers.dev URL directly for now — the custom domain
+  // (license.trysmartcut.com) is cosmetic only and can be wired up later
+  // without any code change other than flipping this string back.
+  var BACKEND_BASE    = "https://smartcut-license.patient-dust-4377.workers.dev";
+  var PRICING_URL     = "https://trysmartcut.com/#pricing";       // anchor → scrolls to pricing cards
   var MANAGE_URL      = "mailto:support@trysmartcut.com";         // fallback only
 
-  // Human-readable plan catalog for UI (kept in sync with Stripe prices).
+  // Human-readable plan catalog for UI (kept in sync with Paddle prices).
   var PLANS = {
     monthly:  { label: "Monthly",  price: "$29.99/mo",      tagline: "Cancel anytime" },
     annual:   { label: "Annual",   price: "$199/year",      tagline: "Save ~45% vs monthly" },
@@ -90,7 +84,19 @@
 
   var TRIAL_DAYS         = 7;
   var TRIAL_MAX_EDITS    = 10;
-  var OFFLINE_GRACE_DAYS = 14;   // how long a valid license works without re-check
+  var OFFLINE_GRACE_DAYS = 14;   // hard wall: after this many offline days the
+                                 // extension blocks until it can phone home.
+                                 // 14d matches the industry default (Adobe CC
+                                 // itself is 30d) and gives editors plenty of
+                                 // room for location shoots / travel without
+                                 // ever seeing a "please connect" nag.
+                                 // Silent background refresh below resets the
+                                 // counter whenever the user is online, so
+                                 // honest users never notice this wall at all.
+  var SILENT_REFRESH_DAYS = 1;   // soft target: try to silently re-verify this
+                                 // often when the user is online. Failures are
+                                 // ignored — only the hard wall blocks usage.
+  var _bgRevalidateInFlight = false;  // guards against duplicate in-flight calls
 
   // ─── Machine fingerprint ──────────────────────────────────────────────────
   function getMachineId() {
@@ -188,23 +194,28 @@
 
   // ─── Public API ───────────────────────────────────────────────────────────
   var License = {
-    // Main pricing page — all three plans live there. Used by the "Buy"
-    // buttons. In-panel dialogs can also deep-link into CHECKOUT_LINKS
-    // directly (see openCheckout below).
+    // Main pricing page — all three plans live there. Used by every
+    // "Upgrade" / "Buy" button inside Premiere. We can't trigger the
+    // Paddle.js overlay from inside the CEP panel (the overlay has to
+    // run on trysmartcut.com where Paddle.js is initialized with our
+    // client token), so we always route the user to the website and
+    // let them pick the plan there.
     BUY_URL:         PRICING_URL,
     PRICING_URL:     PRICING_URL,
-    CHECKOUT_LINKS:  CHECKOUT_LINKS,
     PLANS:           PLANS,
     MANAGE_URL:      MANAGE_URL,      // lifetime fallback
     BACKEND_BASE:    BACKEND_BASE,
     TRIAL_DAYS:      TRIAL_DAYS,
     TRIAL_MAX_EDITS: TRIAL_MAX_EDITS,
 
-    // Resolve a Payment Link URL for a given plan, falling back to the
-    // pricing page if that plan isn't configured.
+    // Opens the pricing page with a hint of which plan the user came for.
+    // The landing page reads ?plan=<slug> and can auto-scroll/highlight the
+    // matching card. Unknown plans just land on #pricing.
     checkoutUrlFor: function (plan) {
-      var link = CHECKOUT_LINKS && CHECKOUT_LINKS[plan];
-      return (link && link.indexOf("REPLACE_WITH") === -1) ? link : PRICING_URL;
+      if (plan === "monthly" || plan === "annual" || plan === "lifetime") {
+        return "https://trysmartcut.com/?plan=" + plan + "#pricing";
+      }
+      return PRICING_URL;
     },
 
     check: function () {
@@ -312,7 +323,7 @@
           lastCheckAt:     new Date().toISOString(),
           purchaseEmail:   resp.email || null,
           activationsUsed: resp.activationsUsed || 1,
-          activationsMax:  resp.activationsMax  || 3,
+          activationsMax:  resp.activationsMax  || 2,
           expiresAt:       resp.expiresAt || null
         };
         saveEnvelope(env);
@@ -320,6 +331,23 @@
       }).catch(function (err) {
         return { ok: false, message: "Could not reach license server (" + (err.message || err) + "). Check your internet and try again." };
       });
+    },
+
+    // Fire-and-forget: if the user is online and we haven't revalidated in a
+    // while, silently refresh `lastCheckAt` so they never actually hit the
+    // OFFLINE_GRACE_DAYS wall during normal use. Network failures are ignored
+    // (they just stay on their current envelope). Call this after the panel
+    // opens and on a cadence while the panel is visible.
+    maybeBackgroundRevalidate: function () {
+      var env = loadEnvelope();
+      if (!env || env.kind !== "full" || env.isDev) return;
+      if (_bgRevalidateInFlight) return;
+      var sinceCheck = (Date.now() - new Date(env.lastCheckAt).getTime()) / 864e5;
+      if (sinceCheck < SILENT_REFRESH_DAYS) return;  // too soon, skip
+      _bgRevalidateInFlight = true;
+      License.revalidate().then(function () {})
+        .catch(function () {})
+        .then(function () { _bgRevalidateInFlight = false; });
     },
 
     revalidate: function () {
@@ -425,7 +453,7 @@
       });
     },
 
-    // Ask the backend for a one-time Stripe Billing Portal URL bound to
+    // Ask the backend for a one-time Paddle Customer Portal URL bound to
     // this license's customer_id. The panel opens it in the system
     // browser so the user can cancel, change card, switch plan, etc.
     // Lifetime licenses don't have a portal — the server returns

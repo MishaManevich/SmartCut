@@ -1,40 +1,62 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// SmartCut — License Worker (Cloudflare, Stripe-backed)
+// SmartCut — License Worker (Cloudflare)
 // ═══════════════════════════════════════════════════════════════════════════
+//
+// Dual-provider — Stripe is the primary payment path, Paddle is kept live
+// as a fallback. Either webhook can mint / mutate the same license record
+// and the panel code stays identical (it just talks to /verify).
 //
 // Responsibilities:
 //   1. Stripe webhooks       → store license keys in KV, reflect status
-//   2. POST /verify          → verify / activate a license (panel calls)
-//   3. POST /deactivate      → drop a machine from the activation list
-//   4. POST /download-url    → hand back a short-lived signed URL to the
+//   2. Paddle webhooks       → same, for the fallback flow
+//   3. POST /verify          → verify / activate a license (panel calls)
+//   4. POST /deactivate      → drop a machine from the activation list
+//   5. POST /download-url    → hand back a short-lived signed URL to the
 //                              latest .zxp hosted in R2. License-gated.
-//   5. GET  /latest-version  → public: { version, notes, releasedAt }
-//   6. POST /portal-url      → mint a Stripe Billing Portal session for the
+//   6. GET  /latest-version  → public: { version, notes, releasedAt }
+//   7. POST /portal-url      → mint a Paddle Customer Portal session for the
 //                              caller's license (one-click "Manage sub")
-//   7. POST /admin/release   → (admin-only) bump LATEST_VERSION after
+//   8. POST /admin/release   → (admin-only) bump LATEST_VERSION after
 //                              uploading a new .zxp to R2
-//   8. POST /admin/grant     → (admin-only) manually create a license
+//   9. POST /admin/grant     → (admin-only) manually create a license
 //                              (for comp copies, support overrides, etc)
+//  10. GET  /lifetime-stats  → public: how many lifetime slots are left
+//                              (powers the landing-page counter)
 //
 // ─── KV schema ──────────────────────────────────────────────────────────────
 //   key:    license:<licenseKey>
 //   value:  {
 //     licenseKey,
 //     email,
-//     status: "active" | "paused" | "refunded" | "canceled",
+//     status: "active" | "paused" | "refunded" | "canceled" | "chargebacked",
 //     plan:   "monthly" | "annual" | "lifetime",
-//     stripeCustomerId,                // for portal sessions
-//     stripeSubscriptionId | null,     // null for lifetime
+//     provider: "paddle" | "stripe",
+//     // Paddle ids (null when license came from Stripe)
+//     paddleCustomerId,
+//     paddleSubscriptionId | null,
+//     paddleTransactionId,
+//     paddlePriceId,
+//     // Stripe ids (null when license came from Paddle)
+//     stripeCustomerId,
+//     stripeSubscriptionId | null,
+//     stripeCheckoutSessionId,
 //     stripePriceId,
 //     createdAt,
-//     expiresAt | null,                // next_billed_at for subs, null for lifetime
+//     expiresAt | null,                // current_period_end for subs, null for lifetime
 //     machineIds: [{ id, meta, activatedAt }],
 //     activationsMax
 //   }
 //
-//   Secondary index (so webhooks can look a license up by Stripe IDs):
-//   key:    stripe:cus:<customer_id>   → licenseKey
-//   key:    stripe:sub:<sub_id>        → licenseKey
+//   Secondary indexes (so webhooks can look up a license by provider ids):
+//     Paddle:
+//       paddle:ctm:<customer_id>     → licenseKey
+//       paddle:sub:<subscription_id> → licenseKey
+//       paddle:txn:<transaction_id>  → licenseKey    (idempotency)
+//     Stripe:
+//       stripe:cus:<customer_id>     → licenseKey
+//       stripe:sub:<subscription_id> → licenseKey
+//       stripe:ses:<session_id>      → licenseKey    (idempotency)
+//       stripe:evt:<event_id>        → "1"           (event-level dedupe, 7d TTL)
 //
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -60,14 +82,16 @@ export default {
       switch (url.pathname) {
         case "/":                         return json({ ok: true, service: "smartcut-license" });
         case "/latest-version":           return handleLatestVersion(env);
+        case "/webhook/paddle":           return handlePaddleWebhook(req, env);
         case "/webhook/stripe":           return handleStripeWebhook(req, env);
         case "/verify":                   return handleVerify(req, env);
         case "/deactivate":               return handleDeactivate(req, env);
         case "/download-url":             return handleDownloadUrl(req, env);
         case "/portal-url":               return handlePortalUrl(req, env);
-        case "/stripe/lifetime-stats":    return handleLifetimeStats(env);
+        case "/lifetime-stats":           return handleLifetimeStats(env);
         case "/admin/release":            return handleAdminRelease(req, env);
         case "/admin/grant":              return handleAdminGrant(req, env);
+        case "/admin/recovery-sweep":     return handleAdminRecoverySweep(req, env);
       }
       return json({ ok: false, reason: "not_found" }, 404);
     } catch (e) {
@@ -75,6 +99,21 @@ export default {
       return json({ ok: false, reason: "server_error",
         message: e.message || String(e) }, 500);
     }
+  },
+
+  // Cloudflare Cron Trigger — invokes this once per scheduled interval.
+  // wrangler.toml declares the cron expression in [triggers.crons].
+  // Each cron pattern executes this whole handler; we dispatch by event.cron.
+  async scheduled(event, env, ctx) {
+    // Hourly sweep for abandoned-cart recoveries.
+    ctx.waitUntil((async () => {
+      try {
+        const result = await sweepAbandonedCarts(env);
+        console.log("cart-recovery sweep:", JSON.stringify(result));
+      } catch (e) {
+        console.error("cart-recovery sweep failed:", e);
+      }
+    })());
   }
 };
 
@@ -121,7 +160,7 @@ async function handleVerify(req, env) {
   const already = rec.machineIds.find(m => m.id === machineId);
 
   if (!already) {
-    if (rec.machineIds.length >= (rec.activationsMax || 3)) {
+    if (rec.machineIds.length >= (rec.activationsMax || 2)) {
       return json({ ok: false, reason: "too_many_activations",
         message: `License already activated on ${rec.activationsMax} machines. Contact support to reset.` });
     }
@@ -143,7 +182,7 @@ async function handleVerify(req, env) {
     email: rec.email || null,
     plan:  rec.plan  || null,
     activationsUsed: rec.machineIds.length,
-    activationsMax:  rec.activationsMax || 3,
+    activationsMax:  rec.activationsMax || 2,
     expiresAt:       rec.expiresAt || null
   });
 }
@@ -163,7 +202,7 @@ async function handleDeactivate(req, env) {
 }
 
 // ─── /portal-url ────────────────────────────────────────────────────────────
-// Mint a Stripe Billing Portal session for the caller's license so the
+// Mint a Paddle Customer Portal session for the caller's license so the
 // "Manage subscription" button in the extension can open straight into
 // their account with one click. Lifetime licenses don't have a portal —
 // they get null back and the client falls back to a mailto.
@@ -186,31 +225,41 @@ async function handlePortalUrl(req, env) {
       message: "This machine isn't activated for this license." });
   }
   // Lifetime licenses have no subscription to manage.
-  if (rec.plan === "lifetime" || !rec.stripeCustomerId) {
+  if (rec.plan === "lifetime" || !rec.paddleCustomerId) {
     return json({ ok: false, reason: "no_subscription",
       message: "Lifetime licenses don't have a subscription portal. " +
                "Email support@trysmartcut.com if you need help." });
   }
 
-  const form = new URLSearchParams();
-  form.set("customer",   rec.stripeCustomerId);
-  form.set("return_url", env.PORTAL_RETURN_URL || "https://trysmartcut.com/thanks");
+  // Paddle's portal API is a POST to the customer's portal-sessions
+  // endpoint. Optionally pass subscription_ids[] to deep-link into the
+  // "Manage this subscription" panel rather than the customer home.
+  const reqBody = rec.paddleSubscriptionId
+    ? { subscription_ids: [rec.paddleSubscriptionId] }
+    : {};
 
-  const res = await fetch("https://api.stripe.com/v1/billing_portal/sessions", {
-    method:  "POST",
-    headers: {
-      "Authorization":  "Bearer " + env.STRIPE_SECRET_KEY,
-      "Content-Type":   "application/x-www-form-urlencoded"
-    },
-    body: form.toString()
+  const res = await paddleFetch(env, `/customers/${rec.paddleCustomerId}/portal-sessions`, {
+    method: "POST",
+    body:   JSON.stringify(reqBody)
   });
-  const data = await res.json();
+  const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     console.error("portal session failed", data);
-    return json({ ok: false, reason: "stripe_error",
-      message: "Stripe could not open the billing portal right now." });
+    return json({ ok: false, reason: "paddle_error",
+      message: "Could not open the billing portal right now." });
   }
-  return json({ ok: true, url: data.url });
+
+  // Paddle returns urls.general.overview for the generic portal and
+  // urls.subscriptions[0].cancel_subscription etc for deep links.
+  // We just send back the overview URL — portal handles all actions from there.
+  const portalUrl =
+    (data.data && data.data.urls && data.data.urls.general && data.data.urls.general.overview) ||
+    null;
+  if (!portalUrl) {
+    return json({ ok: false, reason: "paddle_error",
+      message: "Paddle returned no portal URL." });
+  }
+  return json({ ok: true, url: portalUrl });
 }
 
 // ─── /download-url ──────────────────────────────────────────────────────────
@@ -304,144 +353,185 @@ async function handleSignedDownload(req, env) {
   });
 }
 
-// ─── /webhook/stripe ────────────────────────────────────────────────────────
+// ─── /webhook/paddle ────────────────────────────────────────────────────────
 //
-// Stripe sends signed webhooks. We verify the signature (HMAC-SHA256 of
-// "<timestamp>.<body>" with the endpoint-specific STRIPE_WEBHOOK_SECRET),
-// then dispatch on `type`.
+// Paddle sends signed webhooks. The signature header is:
+//
+//   Paddle-Signature: ts=<unix_seconds>;h1=<hex>
+//
+// Expected HMAC = sha256(`${ts}:${rawBody}`, PADDLE_WEBHOOK_SECRET). We
+// reject anything older than 5 minutes to block replay attacks.
 //
 // Event flow:
 //
-//   checkout.session.completed
-//     → First touchpoint after a successful purchase. We mint a brand-new
-//       licenseKey, store a license record with the Stripe customer_id +
-//       subscription_id, and email the key to the buyer.
+//   transaction.completed
+//     → First touchpoint after a successful purchase (one-time OR first
+//       payment of a subscription). We mint a brand-new licenseKey,
+//       store a license record with the Paddle customer_id +
+//       subscription_id, and email the key to the buyer. Idempotent on
+//       transaction_id so retries don't mint duplicate licenses.
 //
-//   invoice.paid (subscription renewal)
-//     → Extend expiresAt to the new current_period_end.
+//   subscription.activated
+//     → Subscription became active (after trial, after past_due recovery).
+//       Reflect status=active.
 //
-//   customer.subscription.updated
-//     → Plan switches (monthly ↔ annual), pauses, resumes. Reflect
-//       status + expiresAt.
+//   subscription.updated
+//     → Plan switches (monthly ↔ annual), pauses, renewals. We mirror
+//       plan, next_billed_at → expiresAt, status.
 //
-//   customer.subscription.deleted
-//     → Sub canceled. Mark status=canceled; license will fail /verify
-//       after this point.
+//   subscription.canceled
+//     → Sub canceled. Mark status=canceled; license fails /verify after
+//       the current billing period ends.
 //
-//   charge.refunded
-//     → Mark status=refunded.
-async function handleStripeWebhook(req, env) {
+//   subscription.paused / subscription.resumed
+//     → Reflect status=paused / active.
+//
+//   adjustment.created  (action = "refund" or "chargeback")
+//     → Mark status=refunded / chargebacked.
+async function handlePaddleWebhook(req, env) {
   const rawBody   = await req.text();
-  const sigHeader = req.headers.get("Stripe-Signature") || "";
-  if (!await verifyStripeSignature(rawBody, sigHeader, env.STRIPE_WEBHOOK_SECRET)) {
+  const sigHeader = req.headers.get("Paddle-Signature") || "";
+  if (!await verifyPaddleSignature(rawBody, sigHeader, env.PADDLE_WEBHOOK_SECRET)) {
     return new Response("Bad signature", { status: 401 });
   }
 
   const evt = JSON.parse(rawBody);
-  const type = evt.type;
-  const obj  = (evt.data && evt.data.object) || {};
+  const type = evt.event_type;
+  const data = evt.data || {};
 
   switch (type) {
-    case "checkout.session.completed":      await onCheckoutCompleted(obj, env); break;
-    case "invoice.paid":                    await onInvoicePaid(obj, env); break;
-    case "customer.subscription.updated":   await onSubscriptionUpdated(obj, env); break;
-    case "customer.subscription.deleted":   await onSubscriptionDeleted(obj, env); break;
-    case "charge.refunded":                 await onChargeRefunded(obj, env); break;
+    case "transaction.completed":      await onTransactionCompleted(data, env); break;
+    case "transaction.created":        await onTransactionCreatedOrUpdated(data, env); break;
+    case "transaction.updated":        await onTransactionCreatedOrUpdated(data, env); break;
+    case "transaction.canceled":       await onTransactionCanceled(data, env); break;
+    case "subscription.activated":     await onSubscriptionActivated(data, env); break;
+    case "subscription.updated":       await onSubscriptionUpdated(data, env); break;
+    case "subscription.canceled":      await onSubscriptionCanceled(data, env); break;
+    case "subscription.paused":        await onSubscriptionPaused(data, env); break;
+    case "subscription.resumed":       await onSubscriptionActivated(data, env); break;
+    case "adjustment.created":         await onAdjustmentCreated(data, env); break;
     default:
-      // Ignore unhandled events; Stripe sends many we don't care about.
+      // Ignore unhandled events; Paddle sends many we don't care about.
       break;
   }
   return json({ ok: true });
 }
 
-async function onCheckoutCompleted(session, env) {
-  // `mode` tells us whether this was a subscription or one-time (lifetime).
-  const mode = session.mode;                      // "subscription" | "payment"
-  const customerId = session.customer || null;
-  const subscriptionId = session.subscription || null;
-  const email = (session.customer_details && session.customer_details.email)
-             || session.customer_email || null;
+async function onTransactionCompleted(txn, env) {
+  const transactionId  = txn.id;
+  const customerId     = txn.customer_id || null;
+  const subscriptionId = txn.subscription_id || null;
 
-  // Pull the price id so we can tell monthly vs annual vs lifetime.
-  // For subscriptions the price lives on the sub object; for one-time
-  // payments it's in line_items (we expand it via a GET).
-  let priceId = null;
+  // Idempotency: if we've already processed this exact transaction, bail.
+  // Paddle retries webhooks on 5xx for up to 72h so retries are expected.
+  if (transactionId) {
+    const existingLicense = await env.LICENSES.get(`paddle:txn:${transactionId}`);
+    if (existingLicense) return;
+  }
+
+  // Pull the price id. Paddle's transaction payload includes items[] with
+  // full price objects inline (unlike Stripe which makes you expand).
+  const firstItem = txn.items && txn.items[0];
+  const priceId   = (firstItem && firstItem.price && firstItem.price.id) || null;
+  const plan      = planFromPriceId(priceId, env);
+
+  // Work out expiry. For subscriptions it's in txn.billing_period.ends_at
+  // or we fetch the subscription. For lifetime, null = never expires.
   let expiresAt = null;
-  let plan = null;
+  if (subscriptionId) {
+    if (txn.billing_period && txn.billing_period.ends_at) {
+      expiresAt = txn.billing_period.ends_at;
+    } else {
+      // Fallback: fetch the subscription for next_billed_at
+      const subRes = await paddleFetch(env, `/subscriptions/${subscriptionId}`);
+      const subData = await subRes.json().catch(() => ({}));
+      if (subData.data && subData.data.next_billed_at) {
+        expiresAt = subData.data.next_billed_at;
+      }
+    }
+  }
 
-  if (mode === "subscription" && subscriptionId) {
-    const sub = await stripeGet(env, `/v1/subscriptions/${subscriptionId}`);
-    if (sub && sub.items && sub.items.data && sub.items.data[0]) {
-      priceId = sub.items.data[0].price && sub.items.data[0].price.id;
-    }
-    if (sub && sub.current_period_end) {
-      expiresAt = new Date(sub.current_period_end * 1000).toISOString();
-    }
-    plan = planFromPriceId(priceId, env);
-  } else if (mode === "payment") {
-    // Lifetime — expand line items to grab the price.
-    const items = await stripeGet(env,
-      `/v1/checkout/sessions/${session.id}/line_items?expand[]=data.price`);
-    if (items && items.data && items.data[0] && items.data[0].price) {
-      priceId = items.data[0].price.id;
-    }
-    plan = planFromPriceId(priceId, env) || "lifetime";
-    expiresAt = null; // lifetime never expires
+  // Paddle doesn't always include the full customer inline. Fetch to get
+  // the email reliably.
+  let email = null;
+  if (customerId) {
+    const cRes = await paddleFetch(env, `/customers/${customerId}`);
+    const cData = await cRes.json().catch(() => ({}));
+    email = (cData.data && cData.data.email) || null;
   }
 
   // Reuse an existing license if the customer came back to buy again;
   // otherwise mint a fresh key.
   let licenseKey = null;
   if (customerId) {
-    licenseKey = await env.LICENSES.get(`stripe:cus:${customerId}`);
+    licenseKey = await env.LICENSES.get(`paddle:ctm:${customerId}`);
   }
   if (!licenseKey) {
     licenseKey = generateLicenseKey();
   }
 
   const existing = await getLicense(env, licenseKey);
+  const isFirstPurchase = !existing;   // controls whether we email the key
   const rec = existing || emptyLicense(licenseKey, env);
   rec.email                = email || rec.email;
   rec.status               = "active";
   rec.plan                 = plan || rec.plan || "monthly";
-  rec.stripeCustomerId     = customerId || rec.stripeCustomerId;
-  rec.stripeSubscriptionId = subscriptionId || rec.stripeSubscriptionId || null;
-  rec.stripePriceId        = priceId || rec.stripePriceId || null;
+  rec.paddleCustomerId     = customerId || rec.paddleCustomerId;
+  rec.paddleSubscriptionId = subscriptionId || rec.paddleSubscriptionId || null;
+  // paddleTransactionId tracks the ORIGINAL purchase txn, don't overwrite
+  // it on renewals — that's what refund lookups key off of.
+  rec.paddleTransactionId  = rec.paddleTransactionId || transactionId || null;
+  rec.paddlePriceId        = priceId || rec.paddlePriceId || null;
   rec.createdAt            = rec.createdAt || new Date().toISOString();
   rec.expiresAt            = expiresAt;
   await putLicense(env, rec);
 
-  // Secondary indexes so webhook lookups by Stripe id are O(1).
+  // Secondary indexes so webhook lookups by Paddle id are O(1).
   if (customerId) {
-    await env.LICENSES.put(`stripe:cus:${customerId}`, licenseKey);
+    await env.LICENSES.put(`paddle:ctm:${customerId}`, licenseKey);
   }
   if (subscriptionId) {
-    await env.LICENSES.put(`stripe:sub:${subscriptionId}`, licenseKey);
+    await env.LICENSES.put(`paddle:sub:${subscriptionId}`, licenseKey);
+  }
+  if (transactionId) {
+    // Idempotency marker so a retry of transaction.completed can't mint
+    // a second license for the same txn.
+    await env.LICENSES.put(`paddle:txn:${transactionId}`, licenseKey);
   }
 
   // Track lifetime slot consumption for the public counter on the
-  // landing page. Guarded with a per-session marker so webhook retries
-  // (Stripe retries `checkout.session.completed` on failure) don't
-  // double-count the same purchase.
-  if (rec.plan === "lifetime") {
-    await incrementLifetimeSold(env, session.id);
+  // landing page. Guarded with a per-transaction marker so webhook
+  // retries don't double-count the same purchase.
+  if (rec.plan === "lifetime" && transactionId) {
+    await incrementLifetimeSold(env, transactionId);
   }
 
-  // Email the license key to the buyer. Best-effort — we don't fail the
-  // webhook if email delivery hiccups; Stripe will otherwise retry the
-  // whole event and we'd double-process.
-  if (email && env.RESEND_API_KEY) {
-    try { await sendLicenseEmail(env, email, licenseKey, rec.plan); }
-    catch (e) { console.error("license email failed:", e); }
+  // Email the license key to the buyer — but ONLY on the first purchase.
+  // Paddle fires transaction.completed on every renewal too, and we don't
+  // want to spam the user their key every month.
+  //
+  // Best-effort: we don't fail the webhook if email delivery hiccups;
+  // Paddle would otherwise retry the whole event and we'd double-process
+  // (though the txn-id idempotency marker above catches that too).
+  if (isFirstPurchase && email && env.RESEND_API_KEY) {
+    try {
+      await sendLicenseEmail(env, email, licenseKey, rec.plan, {
+        expiresAt: rec.expiresAt
+      });
+    } catch (e) { console.error("license email failed:", e); }
   }
+
+  // Mark the abandoned-cart tracker as converted so the cron doesn't send
+  // a recovery email after a successful purchase.
+  await clearPendingCart(env, { transactionId, email });
 }
 
 // ─── Lifetime slot counter ──────────────────────────────────────────────────
-// Idempotent: marks the session id as seen before incrementing so retries
+// Idempotent: marks the transaction id as seen before incrementing so retries
 // are safe. KV reads are eventually consistent but at 1 purchase/minute
 // scale the racing is not a concern.
-async function incrementLifetimeSold(env, sessionId) {
-  const seenKey = `lifetime:seen:${sessionId}`;
+async function incrementLifetimeSold(env, transactionId) {
+  const seenKey = `lifetime:seen:${transactionId}`;
   const seen    = await env.LICENSES.get(seenKey);
   if (seen) return;
   await env.LICENSES.put(seenKey, "1");
@@ -450,7 +540,7 @@ async function incrementLifetimeSold(env, sessionId) {
   await env.LICENSES.put("lifetime:sold", String(curr + 1));
 }
 
-// ─── /stripe/lifetime-stats (public) ────────────────────────────────────────
+// ─── /lifetime-stats (public) ───────────────────────────────────────────────
 // Powers the "X of 1000 lifetime slots left" counter on the landing page.
 async function handleLifetimeStats(env) {
   const cap  = parseInt(env.LIFETIME_CAP || "1000", 10) || 1000;
@@ -465,39 +555,49 @@ async function handleLifetimeStats(env) {
   });
 }
 
-async function onInvoicePaid(invoice, env) {
-  const subId = invoice.subscription;
-  if (!subId) return;
-  const licenseKey = await env.LICENSES.get(`stripe:sub:${subId}`);
+async function onSubscriptionActivated(sub, env) {
+  const licenseKey = await env.LICENSES.get(`paddle:sub:${sub.id}`);
   if (!licenseKey) return;
   const rec = await getLicense(env, licenseKey);
   if (!rec) return;
-  // Refresh expiresAt from the sub itself — invoices don't always carry it.
-  const sub = await stripeGet(env, `/v1/subscriptions/${subId}`);
-  if (sub && sub.current_period_end) {
-    rec.expiresAt = new Date(sub.current_period_end * 1000).toISOString();
-  }
   rec.status = "active";
+  if (sub.next_billed_at) {
+    rec.expiresAt = sub.next_billed_at;
+  }
+  await putLicense(env, rec);
+}
+
+async function onSubscriptionPaused(sub, env) {
+  const licenseKey = await env.LICENSES.get(`paddle:sub:${sub.id}`);
+  if (!licenseKey) return;
+  const rec = await getLicense(env, licenseKey);
+  if (!rec) return;
+  rec.status = "paused";
   await putLicense(env, rec);
 }
 
 async function onSubscriptionUpdated(sub, env) {
-  const licenseKey = await env.LICENSES.get(`stripe:sub:${sub.id}`);
+  const licenseKey = await env.LICENSES.get(`paddle:sub:${sub.id}`);
   if (!licenseKey) return;
   const rec = await getLicense(env, licenseKey);
   if (!rec) return;
-  // Plan swap?
-  if (sub.items && sub.items.data && sub.items.data[0] && sub.items.data[0].price) {
-    rec.stripePriceId = sub.items.data[0].price.id;
-    rec.plan = planFromPriceId(rec.stripePriceId, env) || rec.plan;
+
+  // Plan swap detection — inspect the first item on the subscription.
+  if (sub.items && sub.items[0] && sub.items[0].price) {
+    const newPriceId = sub.items[0].price.id;
+    rec.paddlePriceId = newPriceId;
+    rec.plan = planFromPriceId(newPriceId, env) || rec.plan;
   }
-  if (sub.current_period_end) {
-    rec.expiresAt = new Date(sub.current_period_end * 1000).toISOString();
+  if (sub.next_billed_at) {
+    rec.expiresAt = sub.next_billed_at;
   }
-  // Stripe statuses: active | trialing | past_due | canceled | unpaid | paused
+
+  // Paddle statuses: active | trialing | past_due | paused | canceled
   if (sub.status === "active" || sub.status === "trialing") {
     rec.status = "active";
-  } else if (sub.status === "past_due" || sub.status === "unpaid" || sub.status === "paused") {
+  } else if (sub.status === "past_due") {
+    rec.status = "paused";
+  } else if (sub.status === "paused") {
     rec.status = "paused";
   } else if (sub.status === "canceled") {
     rec.status = "canceled";
@@ -505,29 +605,340 @@ async function onSubscriptionUpdated(sub, env) {
   await putLicense(env, rec);
 }
 
-async function onSubscriptionDeleted(sub, env) {
+async function onSubscriptionCanceled(sub, env) {
+  const licenseKey = await env.LICENSES.get(`paddle:sub:${sub.id}`);
+  if (!licenseKey) return;
+  const rec = await getLicense(env, licenseKey);
+  if (!rec) return;
+
+  // Paddle fires subscription.canceled in two scenarios: user cancels
+  // themselves (period end is in the future — grace until then) or their
+  // card fails for multiple retries and Paddle dunning-cancels (period
+  // usually ends soon). Either way, user keeps access until expiresAt.
+  const wasAlreadyCanceled = rec.status === "canceled";
+  rec.status = "canceled";
+  // Keep expiresAt as-is — user keeps access until the period ends.
+  // /verify handles expiry-based lockout.
+  await putLicense(env, rec);
+
+  // Send the "sorry to see you go" email exactly once per cancellation.
+  // Best-effort: don't fail the webhook on email hiccups.
+  if (!wasAlreadyCanceled && rec.email && env.RESEND_API_KEY) {
+    try {
+      await sendCancellationEmail(env, rec.email, {
+        licenseKey: rec.licenseKey,
+        plan:       rec.plan,
+        expiresAt:  rec.expiresAt
+      });
+    } catch (e) { console.error("cancellation email failed:", e); }
+  }
+}
+
+// Paddle models refunds and chargebacks as "adjustments". We only care
+// about negative adjustments that actually move money back to the customer.
+async function onAdjustmentCreated(adj, env) {
+  const action = adj.action;                         // "refund" | "chargeback" | "credit"
+  const txnId  = adj.transaction_id || null;
+
+  if (action !== "refund" && action !== "chargeback") return;
+
+  // Map adjustment → transaction → license. We indexed paddle:txn:<id>
+  // when we first minted the license, so this is O(1).
+  let licenseKey = null;
+  if (txnId) {
+    licenseKey = await env.LICENSES.get(`paddle:txn:${txnId}`);
+  }
+  // Fallback: look up by customer_id if we didn't index the txn (shouldn't
+  // happen, but let's not fail silently on first refund in prod).
+  if (!licenseKey && adj.customer_id) {
+    licenseKey = await env.LICENSES.get(`paddle:ctm:${adj.customer_id}`);
+  }
+  if (!licenseKey) return;
+
+  const rec = await getLicense(env, licenseKey);
+  if (!rec) return;
+  rec.status = action === "chargeback" ? "chargebacked" : "refunded";
+  await putLicense(env, rec);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STRIPE webhooks
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// We keep Stripe as the *primary* payment path now (it's live / approved) and
+// leave the Paddle handlers above fully intact as a fallback — flip
+// CHECKOUT_PROVIDER on the landing page and the other one takes over.
+//
+// Stripe-Signature header format:
+//   t=1611001430,v1=<hex>,v1=<hex>,v0=<hex>
+//
+// Expected signature = HMAC-SHA256(secret, `${t}.${rawBody}`). We reject
+// anything older than 5 minutes to block replay attacks. Multiple v1
+// entries can coexist during key rotation — accept if any match.
+//
+// Events we handle (subscribe to these in the Stripe Dashboard when you
+// create the webhook endpoint — see STRIPE-SETUP.md):
+//
+//   checkout.session.completed
+//     → Successful purchase (one-time OR first payment of a subscription).
+//       We mint a licenseKey, store the record with customer/subscription
+//       ids, and email the key. Idempotent on session.id so Stripe's
+//       retries don't create duplicate licenses.
+//
+//   customer.subscription.updated
+//     → Plan changes (monthly ↔ annual), status changes, renewals.
+//       Mirror plan + current_period_end → expiresAt + status.
+//
+//   customer.subscription.deleted
+//     → Subscription ended (either at period-end after a user cancel, or
+//       immediately via dunning). Mark status=canceled; /verify rejects
+//       after expiresAt. Send the "sorry to see you go" email.
+//
+//   invoice.paid
+//     → Subscription renewal succeeded. Bump expiresAt to the new
+//       current_period_end so /verify doesn't lock the user out.
+//
+//   charge.refunded
+//     → Full or partial refund. Mark status=refunded (we lock out on any
+//       refund — partial refunds are rare in SaaS and usually mean the
+//       customer wants out).
+//
+//   charge.dispute.created
+//     → Chargeback opened. Mark status=chargebacked.
+async function handleStripeWebhook(req, env) {
+  const rawBody   = await req.text();
+  const sigHeader = req.headers.get("Stripe-Signature") || "";
+  if (!await verifyStripeSignature(rawBody, sigHeader, env.STRIPE_WEBHOOK_SECRET)) {
+    return new Response("Bad signature", { status: 401 });
+  }
+
+  const evt  = JSON.parse(rawBody);
+  const type = evt.type;
+  const obj  = (evt.data && evt.data.object) || {};
+
+  // Event-level idempotency. Stripe retries for up to ~3 days on 5xx, so
+  // we must make sure the same event.id can be processed twice without
+  // side effects (duplicate emails, duplicate license rows, etc).
+  if (evt.id) {
+    const seen = await env.LICENSES.get(`stripe:evt:${evt.id}`);
+    if (seen) return json({ ok: true, deduped: true });
+  }
+
+  try {
+    switch (type) {
+      case "checkout.session.completed":       await onStripeCheckoutCompleted(obj, env); break;
+      case "customer.subscription.updated":    await onStripeSubscriptionUpdated(obj, env); break;
+      case "customer.subscription.deleted":    await onStripeSubscriptionDeleted(obj, env); break;
+      case "invoice.paid":                     await onStripeInvoicePaid(obj, env); break;
+      case "charge.refunded":                  await onStripeChargeRefunded(obj, env); break;
+      case "charge.dispute.created":           await onStripeChargeDisputeCreated(obj, env); break;
+      default: break;
+    }
+  } catch (e) {
+    // Log and rethrow so Stripe retries transient failures.
+    console.error(`stripe ${type} failed:`, e);
+    throw e;
+  }
+
+  // Record the event as processed only AFTER successful dispatch, so a
+  // transient failure above can still be retried.
+  if (evt.id) {
+    // 7-day TTL is plenty — Stripe stops retrying after ~3 days.
+    await env.LICENSES.put(`stripe:evt:${evt.id}`, "1",
+      { expirationTtl: 7 * 86400 });
+  }
+
+  return json({ ok: true });
+}
+
+async function onStripeCheckoutCompleted(session, env) {
+  // Ignore sessions that haven't actually been paid yet (e.g. async bank
+  // redirects that succeed later fire checkout.session.async_payment_succeeded
+  // instead). Stripe's status vocabulary: "complete" | "expired" | "open".
+  if (session.status !== "complete") return;
+  if (session.payment_status !== "paid" && session.payment_status !== "no_payment_required") {
+    return;
+  }
+
+  const sessionId      = session.id;
+  const customerId     = session.customer || null;
+  const subscriptionId = session.subscription || null;
+  const email          = (session.customer_details && session.customer_details.email)
+    || session.customer_email
+    || null;
+
+  // Idempotency on session.id — Stripe guarantees one session per checkout,
+  // so this collapses any retries of the same purchase.
+  const existingFromSession = await env.LICENSES.get(`stripe:ses:${sessionId}`);
+  if (existingFromSession) return;
+
+  // Webhooks don't include line_items by default. Fetch them to learn the
+  // price id the buyer actually picked (drives plan + lifetime counter).
+  let priceId = null;
+  try {
+    const res = await stripeFetch(env,
+      `/v1/checkout/sessions/${sessionId}/line_items?limit=1`);
+    const data = await res.json().catch(() => ({}));
+    const first = data && data.data && data.data[0];
+    priceId = (first && first.price && first.price.id) || null;
+  } catch (e) {
+    console.error("stripe line_items fetch failed:", e);
+  }
+  const plan = planFromPriceId(priceId, env);
+
+  // For subscriptions, fetch the subscription so we can pin expiresAt to
+  // the real current_period_end (Stripe timestamps are unix seconds).
+  let expiresAt = null;
+  if (subscriptionId) {
+    try {
+      const res = await stripeFetch(env, `/v1/subscriptions/${subscriptionId}`);
+      const sub = await res.json().catch(() => ({}));
+      if (sub && sub.current_period_end) {
+        expiresAt = new Date(sub.current_period_end * 1000).toISOString();
+      }
+    } catch (e) {
+      console.error("stripe subscription fetch failed:", e);
+    }
+  }
+
+  // Reuse existing license if this customer already has one (e.g. they
+  // bought a sub, canceled, and came back for lifetime). Otherwise mint.
+  let licenseKey = null;
+  if (customerId) {
+    licenseKey = await env.LICENSES.get(`stripe:cus:${customerId}`);
+  }
+  if (!licenseKey) licenseKey = generateLicenseKey();
+
+  const existing = await getLicense(env, licenseKey);
+  const isFirstPurchase = !existing;
+  const rec = existing || emptyLicense(licenseKey, env);
+  rec.email                    = email || rec.email;
+  rec.status                   = "active";
+  rec.plan                     = plan || rec.plan || "monthly";
+  rec.provider                 = "stripe";
+  rec.stripeCustomerId         = customerId || rec.stripeCustomerId;
+  rec.stripeSubscriptionId     = subscriptionId || rec.stripeSubscriptionId || null;
+  rec.stripeCheckoutSessionId  = rec.stripeCheckoutSessionId || sessionId || null;
+  rec.stripePriceId            = priceId || rec.stripePriceId || null;
+  rec.createdAt                = rec.createdAt || new Date().toISOString();
+  rec.expiresAt                = expiresAt;
+  await putLicense(env, rec);
+
+  // Secondary indexes for O(1) lookup from later webhooks.
+  if (customerId) {
+    await env.LICENSES.put(`stripe:cus:${customerId}`, licenseKey);
+  }
+  if (subscriptionId) {
+    await env.LICENSES.put(`stripe:sub:${subscriptionId}`, licenseKey);
+  }
+  await env.LICENSES.put(`stripe:ses:${sessionId}`, licenseKey);
+
+  // Public lifetime-slot counter — guarded per-session so retries don't
+  // double-count. We reuse the existing incrementLifetimeSold helper
+  // and prefix the dedupe key with "stripe:ses:" so Paddle txn ids and
+  // Stripe session ids can share the counter without collisions.
+  if (rec.plan === "lifetime") {
+    await incrementLifetimeSold(env, `stripe:ses:${sessionId}`);
+  }
+
+  // Email the key on first purchase only.
+  if (isFirstPurchase && email && env.RESEND_API_KEY) {
+    try {
+      await sendLicenseEmail(env, email, licenseKey, rec.plan, {
+        expiresAt: rec.expiresAt
+      });
+    } catch (e) { console.error("license email failed:", e); }
+  }
+}
+
+async function onStripeSubscriptionUpdated(sub, env) {
   const licenseKey = await env.LICENSES.get(`stripe:sub:${sub.id}`);
   if (!licenseKey) return;
   const rec = await getLicense(env, licenseKey);
   if (!rec) return;
-  rec.status = "canceled";
+
+  // Plan might have changed (upgrade/downgrade). Prefer the new price id
+  // if we recognise it — otherwise keep the existing plan.
+  const newPriceId = sub.items && sub.items.data && sub.items.data[0]
+    && sub.items.data[0].price && sub.items.data[0].price.id;
+  if (newPriceId) {
+    const newPlan = planFromPriceId(newPriceId, env);
+    if (newPlan) rec.plan = newPlan;
+    rec.stripePriceId = newPriceId;
+  }
+
+  if (sub.current_period_end) {
+    rec.expiresAt = new Date(sub.current_period_end * 1000).toISOString();
+  }
+
+  // Stripe status vocabulary: active | trialing | past_due | unpaid |
+  // canceled | incomplete | incomplete_expired | paused. We collapse to
+  // our 4-state model.
+  if (sub.status === "active" || sub.status === "trialing") {
+    rec.status = "active";
+  } else if (sub.status === "past_due" || sub.status === "unpaid") {
+    rec.status = "paused";
+  } else if (sub.status === "canceled" || sub.status === "incomplete_expired") {
+    rec.status = "canceled";
+  }
   await putLicense(env, rec);
 }
 
-async function onChargeRefunded(charge, env) {
-  // Charges can belong to a subscription invoice or a one-time payment.
-  // For subs we follow charge → invoice → sub → license; for lifetime we
-  // fall back to finding the customer's license.
-  let licenseKey = null;
-  if (charge.invoice) {
-    const inv = await stripeGet(env, `/v1/invoices/${charge.invoice}`);
-    if (inv && inv.subscription) {
-      licenseKey = await env.LICENSES.get(`stripe:sub:${inv.subscription}`);
-    }
+async function onStripeSubscriptionDeleted(sub, env) {
+  const licenseKey = await env.LICENSES.get(`stripe:sub:${sub.id}`);
+  if (!licenseKey) return;
+  const rec = await getLicense(env, licenseKey);
+  if (!rec) return;
+
+  const wasAlreadyCanceled = rec.status === "canceled";
+  rec.status = "canceled";
+  // Keep expiresAt as-is — user keeps access until the period ends, just
+  // like the Paddle flow.
+  if (sub.ended_at) {
+    rec.expiresAt = new Date(sub.ended_at * 1000).toISOString();
+  } else if (sub.current_period_end) {
+    rec.expiresAt = new Date(sub.current_period_end * 1000).toISOString();
   }
-  if (!licenseKey && charge.customer) {
-    licenseKey = await env.LICENSES.get(`stripe:cus:${charge.customer}`);
+  await putLicense(env, rec);
+
+  if (!wasAlreadyCanceled && rec.email && env.RESEND_API_KEY) {
+    try {
+      await sendCancellationEmail(env, rec.email, {
+        licenseKey: rec.licenseKey,
+        plan:       rec.plan,
+        expiresAt:  rec.expiresAt
+      });
+    } catch (e) { console.error("cancellation email failed:", e); }
   }
+}
+
+async function onStripeInvoicePaid(invoice, env) {
+  const subscriptionId = invoice.subscription || null;
+  if (!subscriptionId) return;
+  const licenseKey = await env.LICENSES.get(`stripe:sub:${subscriptionId}`);
+  if (!licenseKey) return;
+  const rec = await getLicense(env, licenseKey);
+  if (!rec) return;
+
+  // Bump expiresAt from the invoice's period_end — this is the simplest
+  // way to keep /verify happy across renewals without a second API call.
+  const lineEnd = invoice.lines && invoice.lines.data && invoice.lines.data[0]
+    && invoice.lines.data[0].period && invoice.lines.data[0].period.end;
+  if (lineEnd) {
+    rec.expiresAt = new Date(lineEnd * 1000).toISOString();
+  } else if (invoice.period_end) {
+    rec.expiresAt = new Date(invoice.period_end * 1000).toISOString();
+  }
+  if (rec.status !== "canceled") rec.status = "active";
+  await putLicense(env, rec);
+}
+
+async function onStripeChargeRefunded(charge, env) {
+  // A charge knows its customer but not its license directly — look up by
+  // customer_id (indexed when we minted the license).
+  const customerId = charge.customer || null;
+  if (!customerId) return;
+  const licenseKey = await env.LICENSES.get(`stripe:cus:${customerId}`);
   if (!licenseKey) return;
   const rec = await getLicense(env, licenseKey);
   if (!rec) return;
@@ -535,28 +946,424 @@ async function onChargeRefunded(charge, env) {
   await putLicense(env, rec);
 }
 
-// Map a Stripe price id to our plan slug. Configure these in wrangler.toml
-// ([vars] STRIPE_PRICE_MONTHLY / _ANNUAL / _LIFETIME).
+async function onStripeChargeDisputeCreated(dispute, env) {
+  // Dispute objects expose charge → customer. Resolve customer by fetching
+  // the underlying charge.
+  const chargeId = dispute.charge || null;
+  if (!chargeId) return;
+  try {
+    const res = await stripeFetch(env, `/v1/charges/${chargeId}`);
+    const charge = await res.json().catch(() => ({}));
+    const customerId = charge && charge.customer;
+    if (!customerId) return;
+    const licenseKey = await env.LICENSES.get(`stripe:cus:${customerId}`);
+    if (!licenseKey) return;
+    const rec = await getLicense(env, licenseKey);
+    if (!rec) return;
+    rec.status = "chargebacked";
+    await putLicense(env, rec);
+  } catch (e) {
+    console.error("stripe dispute lookup failed:", e);
+  }
+}
+
+// ─── Stripe helpers ──────────────────────────────────────────────────────────
+
+// Minimal fetch wrapper — same API base URL for test + live keys, the key
+// prefix (sk_test_ vs sk_live_) decides which dataset you hit. We set
+// Stripe-Version explicitly to pin behaviour; bump this when we
+// consciously upgrade to newer event shapes.
+function stripeFetch(env, path, opts = {}) {
+  if (!env.STRIPE_API_KEY) {
+    throw new Error("STRIPE_API_KEY not set");
+  }
+  const headers = {
+    "Authorization": `Bearer ${env.STRIPE_API_KEY}`,
+    "Stripe-Version": "2024-06-20",
+    ...(opts.headers || {})
+  };
+  if (opts.body && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/x-www-form-urlencoded";
+  }
+  return fetch(`https://api.stripe.com${path}`, { ...opts, headers });
+}
+
+// Stripe-Signature format:
+//   t=1611001430,v1=<hex>,v1=<hex>,v0=<hex>
+// Expected = HMAC-SHA256(secret, `${t}.${rawBody}`)
+// Multiple v1 entries can appear during secret rotation — accept if any match.
+async function verifyStripeSignature(body, header, secret) {
+  if (!header || !secret) return false;
+
+  let ts = null;
+  const v1s = [];
+  for (const seg of header.split(",")) {
+    const idx = seg.indexOf("=");
+    if (idx <= 0) continue;
+    const k = seg.slice(0, idx).trim();
+    const v = seg.slice(idx + 1).trim();
+    if (k === "t") ts = v;
+    else if (k === "v1") v1s.push(v);
+  }
+  if (!ts || v1s.length === 0) return false;
+
+  const now   = Math.floor(Date.now() / 1000);
+  const tsNum = parseInt(ts, 10);
+  if (!tsNum || Math.abs(now - tsNum) > 300) return false;
+
+  const expected = await hmacSha256Hex(secret, `${ts}.${body}`);
+  for (const candidate of v1s) {
+    if (timingSafeEqual(expected, candidate)) return true;
+  }
+  return false;
+}
+
+// ─── Abandoned-cart recovery ─────────────────────────────────────────────────
+//
+// Two-tier recovery funnel, designed to work *alongside* Paddle's built-in
+// 60-minute recovery email (which you enable in the Paddle dashboard at a
+// conservative 15-20%):
+//
+//   T+60min  — Paddle sends their own recovery email @ ~15-20% off       (built-in)
+//   T+72h    — We send a "final chance" email @ 33% off                  (this code)
+//
+// Paddle's own research shows 10-20% converts better than deeper
+// discounts — going too deep anchors buyers on a low price and signals
+// desperation. We only escalate to 33% for users who already ignored
+// Paddle's first recovery nudge (i.e. genuinely cold leads), and cap the
+// discount at 7-day validity + 1 use so it can't spread.
+//
+// KV schema:
+//   pending:<txn_id> → {
+//     email, plan, priceId, customerId,
+//     createdAt,           // first seen (ISO)
+//     lastSeenAt,          // most recent txn.updated (ISO)
+//     notifiedAt?,         // ISO when we sent our recovery email (prevents dupes)
+//     discountId?          // Paddle discount id we minted (for tracing)
+//   }
+//   Record gets TTL'd after 10 days via the cron sweep.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
+const PENDING_PREFIX = "pending:";
+
+// Fires on every transaction.created / transaction.updated webhook. We
+// only care about "ready" or "billed" transactions that have a customer
+// email but aren't completed — those are the carts a user could still
+// come back to finish or abandon.
+async function onTransactionCreatedOrUpdated(txn, env) {
+  const txnId  = txn.id;
+  const status = txn.status;   // draft | ready | billed | paid | completed | canceled
+  if (!txnId) return;
+
+  // Completed/paid transactions are handled by transaction.completed.
+  // Draft = Paddle hasn't even asked for email yet. Skip both.
+  if (status === "completed" || status === "paid") {
+    await clearPendingCart(env, { transactionId: txnId });
+    return;
+  }
+  if (status === "canceled") {
+    // Keep the pending record — abandonment cron will still send a
+    // recovery email if it's old enough. transaction.canceled only
+    // fires on explicit cancels (rare).
+    return;
+  }
+  if (status !== "ready" && status !== "billed") {
+    return;   // draft or unknown state — no email captured yet
+  }
+
+  // Skip if Paddle hasn't yet surfaced an email / customer on this txn.
+  // The txn.updated webhook fires again once it does.
+  const customerId = txn.customer_id || null;
+  let email = null;
+  if (txn.customer && txn.customer.email) email = txn.customer.email;
+  if (!email && customerId) {
+    const cRes  = await paddleFetch(env, `/customers/${customerId}`);
+    const cData = await cRes.json().catch(() => ({}));
+    email = (cData.data && cData.data.email) || null;
+  }
+  if (!email) return;
+
+  // Skip existing customers — we don't want to email recovery to
+  // someone who already has an active license.
+  if (customerId) {
+    const existingKey = await env.LICENSES.get(`paddle:ctm:${customerId}`);
+    if (existingKey) {
+      const existingRec = await getLicense(env, existingKey);
+      if (existingRec && existingRec.status === "active") return;
+    }
+  }
+
+  // Work out which plan they were buying.
+  const firstItem = txn.items && txn.items[0];
+  const priceId   = (firstItem && firstItem.price && firstItem.price.id) || null;
+  const plan      = planFromPriceId(priceId, env);
+
+  const key  = PENDING_PREFIX + txnId;
+  const prev = await env.LICENSES.get(key, "json");
+  const now  = new Date().toISOString();
+
+  const rec = prev || {};
+  rec.email       = email;
+  rec.plan        = plan;
+  rec.priceId     = priceId;
+  rec.customerId  = customerId;
+  rec.createdAt   = rec.createdAt || now;
+  rec.lastSeenAt  = now;
+  // notifiedAt / discountId preserved from prev if already set.
+
+  // 10-day TTL — the cron will sweep long before this, but serves as a
+  // safety net in case the cron ever stops running. 10 * 86400 = 864000.
+  await env.LICENSES.put(key, JSON.stringify(rec), { expirationTtl: 864000 });
+}
+
+// Fires when Paddle tells us explicitly the transaction was canceled
+// (user closed the window, time-out, etc). We keep the pending record
+// so the recovery cron can still send an email.
+async function onTransactionCanceled(txn, env) {
+  // No-op for now; pending record stays in KV until the cron processes it.
+  // Intentionally left lean — kept as a named function so future changes
+  // to cancel-specific logic (e.g. instant recovery) have a landing spot.
+}
+
+// Delete a pending-cart record (called after a successful purchase).
+// Accepts either a transactionId or an email match. Best-effort.
+async function clearPendingCart(env, { transactionId, email }) {
+  if (transactionId) {
+    await env.LICENSES.delete(PENDING_PREFIX + transactionId);
+  }
+  if (email) {
+    // Also sweep any other pending records for this email (same user might
+    // have bounced once and come back with a different txn id).
+    const list = await env.LICENSES.list({ prefix: PENDING_PREFIX });
+    for (const k of list.keys) {
+      const rec = await env.LICENSES.get(k.name, "json");
+      if (rec && rec.email && rec.email.toLowerCase() === email.toLowerCase()) {
+        await env.LICENSES.delete(k.name);
+      }
+    }
+  }
+}
+
+// Map a Paddle price id to our plan slug. Configure these in wrangler.toml
+// ([vars] PADDLE_PRICE_MONTHLY / _ANNUAL / _LIFETIME).
+// Plan is inferred from whichever price id the webhook surfaced — we don't
+// care which provider sent it, the env var match tells us what the buyer
+// actually picked. Keeping both Paddle and Stripe lookups here means the
+// downstream license-creation code stays provider-agnostic.
 function planFromPriceId(priceId, env) {
   if (!priceId) return null;
+  if (priceId === env.PADDLE_PRICE_MONTHLY)  return "monthly";
+  if (priceId === env.PADDLE_PRICE_ANNUAL)   return "annual";
+  if (priceId === env.PADDLE_PRICE_LIFETIME) return "lifetime";
   if (priceId === env.STRIPE_PRICE_MONTHLY)  return "monthly";
   if (priceId === env.STRIPE_PRICE_ANNUAL)   return "annual";
   if (priceId === env.STRIPE_PRICE_LIFETIME) return "lifetime";
   return null;
 }
 
-// Thin Stripe GET helper for expanding webhook data when we need it.
-async function stripeGet(env, path) {
-  const r = await fetch("https://api.stripe.com" + path, {
-    headers: { "Authorization": "Bearer " + env.STRIPE_SECRET_KEY }
+// ─── Paddle discount API ────────────────────────────────────────────────────
+// Creates a one-shot percentage discount tied to a specific price id.
+//
+// Paddle's /discounts endpoint expects:
+//   amount        — percentage as a STRING ("33" not 33)
+//   type          — "percentage" | "flat" | "flat_per_seat"
+//   code          — unique code buyers type at checkout
+//   usage_limit   — 1 = can only be redeemed once total
+//   expires_at    — ISO; after this, the code stops working
+//   restrict_to   — [priceId] so it only applies to the intended plan
+//   enabled_for_checkout — true so overlay checkout accepts it
+//
+// Docs: https://developer.paddle.com/api-reference/discounts/create-discount
+async function createRecoveryDiscount(env, { percent, priceId, label }) {
+  if (!env.PADDLE_API_KEY) {
+    throw new Error("PADDLE_API_KEY not set — can't mint recovery discount");
+  }
+
+  // Generate a unique, human-typeable code. "COMEBACK-<6-char>" is short
+  // enough to paste from email but unguessable (32^6 = 1B combos).
+  const alpha = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I/L
+  const bytes = new Uint8Array(6);
+  crypto.getRandomValues(bytes);
+  let suffix = "";
+  for (const b of bytes) suffix += alpha[b % alpha.length];
+  const code = "COMEBACK-" + suffix;
+
+  // 7-day validity — long enough to get through a weekend, short enough
+  // that the urgency of the email actually matters.
+  const expiresAt = new Date(Date.now() + 7 * 864e5).toISOString();
+
+  const body = {
+    amount:      String(percent),
+    type:        "percentage",
+    description: label || `Recovery ${percent}%`,
+    code,
+    usage_limit: 1,
+    expires_at:  expiresAt,
+    enabled_for_checkout: true,
+    ...(priceId ? { restrict_to: [priceId] } : {})
+  };
+
+  const r    = await paddleFetch(env, "/discounts", {
+    method: "POST",
+    body:   JSON.stringify(body)
   });
-  if (!r.ok) return null;
-  return r.json();
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok || !data.data) {
+    throw new Error("Paddle discount create failed: HTTP " + r.status +
+                    " " + JSON.stringify(data));
+  }
+  return { id: data.data.id, code, expiresAt };
+}
+
+// ─── Email 3: abandoned-cart recovery (our custom follow-up) ────────────────
+async function sendAbandonmentEmail(env, to, { plan, discountCode, percent }) {
+  const d = planDetails(plan);
+
+  // Checkout deep-link — the landing page's main.tsx handles ?plan=<slug>
+  // by auto-opening the Paddle overlay for that plan. User can paste the
+  // discount code in the overlay to redeem.
+  const deepLink = "https://trysmartcut.com/?plan=" + (plan || "monthly") + "#pricing";
+
+  const codeBlock = `
+    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin:22px 0;border:1px solid #ea580c;border-radius:12px;background:linear-gradient(135deg,#431407,#1f0a02);">
+      <tr><td style="padding:20px 22px;text-align:center;">
+        <div style="font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#fb923c;margin-bottom:10px;">Your discount code — ${percent}% off</div>
+        <div style="font-family:'SFMono-Regular',Menlo,Monaco,Consolas,monospace;font-size:22px;font-weight:700;color:#ffffff;letter-spacing:0.06em;">${discountCode}</div>
+        <div style="font-size:12px;color:#fdba74;margin-top:10px;">Valid for 7 days, single use</div>
+      </td></tr>
+    </table>`;
+
+  const bodyHtml = `
+    <p style="margin:0 0 14px;">Saw you checking out SmartCut — looks like something didn't click at checkout.</p>
+    <p style="margin:0 0 14px;">If it was the price, here's one on us: <b style="color:#fb923c;">${percent}% off</b> any plan for the next 7 days.</p>
+    ${codeBlock}
+    <p style="margin:16px 0 0;">Just paste it into the discount field at checkout. No tricks — one-time use, yours alone.</p>
+    <p style="margin:14px 0 0;color:#a1a1aa;font-size:13.5px;">If it was something else — a feature, a bug, a question — just reply to this email. We read every one and usually respond within a few hours.</p>`;
+
+  const text = [
+    `Saw you checking out SmartCut — looks like something didn't click.`,
+    ``,
+    `If it was the price, here's ${percent}% off any plan for 7 days:`,
+    ``,
+    `    ${discountCode}`,
+    ``,
+    `Paste it into the discount field at checkout: ${deepLink}`,
+    ``,
+    `Valid 7 days, single use.`,
+    ``,
+    `If it was something else — a feature, a bug, a question — just`,
+    `reply to this email. We read every one.`,
+    ``,
+    `— The SmartCut team`
+  ].join("\n");
+
+  await sendResendEmail(env, {
+    to,
+    subject: `${percent}% off SmartCut — 7 days only`,
+    html:    renderEmailShell({
+      preheader:  `${percent}% off any plan, valid 7 days. Here's your code.`,
+      heading:    `One more try, on us.`,
+      bodyHtml,
+      ctaHref:    deepLink,
+      ctaLabel:   `Claim ${percent}% off`,
+      footerNote: `Single-use code, expires in 7 days. If you don't want emails like this, just reply "stop" and we'll never send another one.`
+    }),
+    text,
+    replyTo: "support@trysmartcut.com"
+  });
+}
+
+// ─── Scheduled: sweep abandoned carts, mint discounts, send recovery ────────
+//
+// Runs every hour (see wrangler.toml [triggers]). Finds pending-cart
+// records that are:
+//   • at least RECOVERY_MIN_AGE_HOURS old (default 72h — Paddle has already
+//     sent its own 60-min recovery email by then, so we're the second touch)
+//   • less than RECOVERY_MAX_AGE_HOURS old (default 168h / 7d — beyond that
+//     the user has moved on, don't be annoying)
+//   • not yet notified (notifiedAt missing)
+//
+// For each: mint a single-use 33% discount via Paddle API, send the
+// recovery email, mark notifiedAt so we never email them twice.
+async function sweepAbandonedCarts(env) {
+  const minAgeH = parseInt(env.RECOVERY_MIN_AGE_HOURS || "72", 10);
+  const maxAgeH = parseInt(env.RECOVERY_MAX_AGE_HOURS || "168", 10);
+  const percent = parseInt(env.RECOVERY_DISCOUNT_PERCENT || "33", 10);
+  const now     = Date.now();
+
+  const list = await env.LICENSES.list({ prefix: PENDING_PREFIX });
+  let sent = 0, skipped = 0, errored = 0;
+
+  for (const k of list.keys) {
+    try {
+      const rec = await env.LICENSES.get(k.name, "json");
+      if (!rec)                                 { skipped++; continue; }
+      if (rec.notifiedAt)                       { skipped++; continue; }
+      if (!rec.email || !rec.plan)              { skipped++; continue; }
+
+      const ageMs = now - new Date(rec.createdAt).getTime();
+      const ageH  = ageMs / 36e5;
+      if (ageH < minAgeH || ageH > maxAgeH)     { skipped++; continue; }
+
+      // Defensive: re-check they haven't since purchased (race vs. webhooks).
+      if (rec.customerId) {
+        const existingKey = await env.LICENSES.get(`paddle:ctm:${rec.customerId}`);
+        if (existingKey) {
+          const existing = await getLicense(env, existingKey);
+          if (existing && existing.status === "active") {
+            await env.LICENSES.delete(k.name);
+            skipped++; continue;
+          }
+        }
+      }
+
+      // Mint the discount (Paddle-side) and send the email.
+      const discount = await createRecoveryDiscount(env, {
+        percent,
+        priceId: rec.priceId,
+        label:   `Recovery ${percent}% for ${rec.email}`
+      });
+      await sendAbandonmentEmail(env, rec.email, {
+        plan:         rec.plan,
+        discountCode: discount.code,
+        percent
+      });
+
+      rec.notifiedAt  = new Date().toISOString();
+      rec.discountId  = discount.id;
+      await env.LICENSES.put(k.name, JSON.stringify(rec), { expirationTtl: 864000 });
+      sent++;
+    } catch (e) {
+      console.error("cart-recovery error for", k.name, e);
+      errored++;
+    }
+  }
+
+  return { sent, skipped, errored, scanned: list.keys.length };
+}
+
+// ─── Paddle API helper ──────────────────────────────────────────────────────
+// Thin wrapper around Paddle's REST API for expanding webhook data, minting
+// portal sessions, etc. Switches base URL based on PADDLE_ENV so the same
+// worker can serve sandbox (testing) and production (real money).
+async function paddleFetch(env, path, init = {}) {
+  const base = env.PADDLE_ENV === "production"
+    ? "https://api.paddle.com"
+    : "https://sandbox-api.paddle.com";
+  return fetch(base + path, {
+    ...init,
+    headers: {
+      "Authorization": "Bearer " + env.PADDLE_API_KEY,
+      "Content-Type":  "application/json",
+      ...(init.headers || {})
+    }
+  });
 }
 
 // ─── License key format ─────────────────────────────────────────────────────
 // 4×5-char groups from a crypto-safe alphabet. ~90 bits of entropy, easy for
-// humans to read out over the phone. Example: "7F4K9-M2XQT-5HNBV-JC8LR"
+// humans to read out over the phone. Example: "SC-7F4K9-M2XQT-5HNBV-JC8LR"
 function generateLicenseKey() {
   const alpha = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"; // no 0/O/1/I to avoid confusion
   const bytes = new Uint8Array(20);
@@ -569,36 +1376,70 @@ function generateLicenseKey() {
   return "SC-" + out.join("");
 }
 
-// ─── License-key email ──────────────────────────────────────────────────────
-// Uses Resend (https://resend.com) because it's the cheapest
-// transactional-email provider that runs on a plain fetch. Swap in
-// Postmark / SendGrid / SES by changing this one function.
-async function sendLicenseEmail(env, to, licenseKey, plan) {
-  const planLabel =
-    plan === "annual"   ? "annual" :
-    plan === "lifetime" ? "lifetime" :
-                          "monthly";
-  const subject = `Your SmartCut license key (${planLabel})`;
-  const text = [
-    "Thanks for picking up SmartCut — your license key is below.",
-    "",
-    "    " + licenseKey,
-    "",
-    "To activate:",
-    "  1. Open Premiere Pro → Window → Extensions → SmartCut",
-    "  2. Paste the key above into the activation box",
-    "  3. Start cutting",
-    "",
-    "You can use this key on up to 3 machines. Need help? Just reply to this email.",
-    "",
-    "— The SmartCut team"
-  ].join("\n");
+// ─── Transactional-email infrastructure ─────────────────────────────────────
+// Uses Resend (https://resend.com) — cheapest/simplest transactional provider
+// that runs on a plain fetch. Swap for Postmark / SendGrid / SES by
+// editing sendResendEmail() below. All message content is inlined here so
+// you can tweak copy without chasing templates across files.
+//
+// The free tier (100/day, 3k/month) covers us until ~100 sales/day. After
+// that it's $20/mo for 50k — still trivial vs. revenue.
+//
+// Human-readable plan catalog — kept in sync with config/paddle pricing.
+// Single source of truth so every email says the same thing.
+const PLAN_DETAILS = {
+  monthly: {
+    label:        "SmartCut Monthly",
+    price:        "$29.99 / month",
+    billing:      "Monthly subscription — renews automatically, cancel anytime",
+    accessCopy:   "Your subscription renews on {renewDate}. You can cancel or change card from the Paddle billing portal any time (we'll send you a link if you need one).",
+    manageCopy:   "Reply to this email and we'll send you a one-click link to your billing portal."
+  },
+  annual: {
+    label:        "SmartCut Annual",
+    price:        "$199 / year",
+    billing:      "Annual subscription — renews automatically, cancel anytime",
+    accessCopy:   "Your subscription renews on {renewDate}. You can cancel or change card from the Paddle billing portal any time (we'll send you a link if you need one).",
+    manageCopy:   "Reply to this email and we'll send you a one-click link to your billing portal."
+  },
+  lifetime: {
+    label:        "SmartCut Lifetime",
+    price:        "$49 — one-time",
+    billing:      "Lifetime access — you own it forever, no renewals",
+    accessCopy:   "This is a one-time purchase. You'll get every future update to SmartCut included, forever, with no recurring charges. You can activate it on up to 2 machines simultaneously.",
+    manageCopy:   "There's no billing portal for lifetime licenses — just keep this email somewhere safe. If you lose the key, reply to this email and we'll resend it."
+  }
+};
 
+function planDetails(plan) {
+  return PLAN_DETAILS[plan] || PLAN_DETAILS.monthly;
+}
+
+// Format an ISO timestamp as "Nov 12, 2026" — friendly but unambiguous.
+function formatHumanDate(iso) {
+  if (!iso) return "";
+  try {
+    return new Date(iso).toLocaleDateString("en-US", {
+      year: "numeric", month: "short", day: "numeric"
+    });
+  } catch (e) {
+    return "";
+  }
+}
+
+// Low-level Resend call. All send* helpers funnel through this.
+async function sendResendEmail(env, { to, subject, html, text, replyTo }) {
+  if (!env.RESEND_API_KEY) {
+    console.warn("sendResendEmail skipped: RESEND_API_KEY not set");
+    return;
+  }
   const body = {
     from:    env.MAIL_FROM || "SmartCut <license@trysmartcut.com>",
-    to:      [to],
-    subject: subject,
-    text:    text
+    to:      Array.isArray(to) ? to : [to],
+    subject,
+    html,
+    text,
+    ...(replyTo ? { reply_to: replyTo } : {})
   };
   const r = await fetch("https://api.resend.com/emails", {
     method:  "POST",
@@ -612,6 +1453,183 @@ async function sendLicenseEmail(env, to, licenseKey, plan) {
     const err = await r.text();
     throw new Error("Resend HTTP " + r.status + ": " + err);
   }
+}
+
+// Shared HTML shell — keeps all three email types (license / cancel /
+// recovery) visually consistent. Uses table-based layout for max
+// compatibility across mail clients (Gmail, Outlook, Apple Mail).
+function renderEmailShell({ preheader, heading, bodyHtml, ctaHref, ctaLabel, footerNote }) {
+  const cta = ctaHref && ctaLabel ? `
+    <table role="presentation" cellspacing="0" cellpadding="0" border="0" align="center" style="margin:24px auto 0">
+      <tr><td style="border-radius:10px;background:#f97316;">
+        <a href="${ctaHref}" style="display:inline-block;padding:13px 28px;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;letter-spacing:0.01em;border-radius:10px;background:#f97316;">${ctaLabel}</a>
+      </td></tr>
+    </table>` : "";
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${heading}</title>
+</head>
+<body style="margin:0;padding:0;background:#0a0a0b;color:#e4e4e7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;">
+<span style="display:none;font-size:0;line-height:0;max-height:0;max-width:0;opacity:0;overflow:hidden;">${preheader || ""}</span>
+<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background:#0a0a0b;padding:40px 16px;">
+  <tr><td align="center">
+    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="560" style="max-width:560px;background:#111113;border:1px solid #27272a;border-radius:14px;overflow:hidden;">
+      <tr><td style="padding:32px 32px 8px 32px;">
+        <div style="font-size:15px;font-weight:600;color:#f97316;letter-spacing:-0.01em;">SmartCut</div>
+      </td></tr>
+      <tr><td style="padding:8px 32px 0 32px;">
+        <h1 style="margin:0 0 12px 0;font-size:22px;font-weight:700;color:#fafafa;letter-spacing:-0.01em;line-height:1.3;">${heading}</h1>
+      </td></tr>
+      <tr><td style="padding:4px 32px 32px 32px;font-size:14.5px;line-height:1.6;color:#d4d4d8;">
+        ${bodyHtml}
+        ${cta}
+      </td></tr>
+      <tr><td style="padding:16px 32px 32px 32px;border-top:1px solid #27272a;font-size:12.5px;line-height:1.55;color:#71717a;">
+        ${footerNote || ""}
+        <div style="margin-top:12px;color:#52525b;">— The SmartCut team · <a href="https://trysmartcut.com" style="color:#a1a1aa;text-decoration:underline;">trysmartcut.com</a></div>
+      </td></tr>
+    </table>
+  </td></tr>
+</table>
+</body>
+</html>`;
+}
+
+// ─── Email 1: license key delivery (on first purchase) ─────────────────────
+async function sendLicenseEmail(env, to, licenseKey, plan, opts = {}) {
+  const d        = planDetails(plan);
+  const renewDate = opts.expiresAt ? formatHumanDate(opts.expiresAt) : "";
+  const accessCopy = d.accessCopy.replace("{renewDate}", renewDate || "your next billing date");
+
+  const keyBlock = `
+    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin:20px 0;border:1px solid #27272a;border-radius:10px;background:#09090b;">
+      <tr><td style="padding:18px 22px;">
+        <div style="font-size:11px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#71717a;margin-bottom:8px;">Your license key</div>
+        <div style="font-family:'SFMono-Regular',Menlo,Monaco,Consolas,monospace;font-size:16px;font-weight:600;color:#fafafa;letter-spacing:0.02em;word-break:break-all;">${licenseKey}</div>
+      </td></tr>
+    </table>`;
+
+  const planBlock = `
+    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin:20px 0;border:1px solid #27272a;border-radius:10px;background:#09090b;">
+      <tr><td style="padding:16px 22px;">
+        <div style="font-size:11px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#71717a;margin-bottom:6px;">Plan</div>
+        <div style="font-size:15px;font-weight:600;color:#fafafa;">${d.label}</div>
+        <div style="font-size:13.5px;color:#a1a1aa;margin-top:3px;">${d.price}</div>
+        <div style="font-size:12.5px;color:#71717a;margin-top:8px;">${d.billing}</div>
+      </td></tr>
+    </table>`;
+
+  const bodyHtml = `
+    <p style="margin:0 0 12px;">Thanks for picking up SmartCut — you're all set.</p>
+    ${planBlock}
+    ${keyBlock}
+    <p style="margin:16px 0 8px;font-weight:600;color:#fafafa;">How to activate</p>
+    <ol style="margin:0 0 16px 20px;padding:0;color:#d4d4d8;">
+      <li style="margin-bottom:6px;">Open Premiere Pro and go to <b>Window → Extensions → SmartCut</b>.</li>
+      <li style="margin-bottom:6px;">Paste the key above into the activation box.</li>
+      <li style="margin-bottom:6px;">Click <b>Activate</b> — you'll see a green "Active" badge.</li>
+    </ol>
+    <p style="margin:16px 0 0;">${accessCopy}</p>
+    <p style="margin:12px 0 0;color:#a1a1aa;font-size:13.5px;">One key activates on up to <b>2 machines</b> simultaneously. You can free up a slot any time from the extension's settings.</p>`;
+
+  const text = [
+    `SmartCut — your license key`,
+    ``,
+    `Plan:   ${d.label} (${d.price})`,
+    `Terms:  ${d.billing}`,
+    renewDate ? `Renews: ${renewDate}` : "",
+    ``,
+    `License key:`,
+    `    ${licenseKey}`,
+    ``,
+    `To activate:`,
+    `  1. Open Premiere Pro → Window → Extensions → SmartCut`,
+    `  2. Paste the key above into the activation box`,
+    `  3. Click Activate`,
+    ``,
+    `${accessCopy}`,
+    ``,
+    `Activates on up to 2 machines. ${d.manageCopy}`,
+    ``,
+    `— The SmartCut team`
+  ].filter(Boolean).join("\n");
+
+  await sendResendEmail(env, {
+    to,
+    subject:    `Your SmartCut license (${d.label})`,
+    html:       renderEmailShell({
+      preheader:  `Your ${d.label} license key is inside — 3 steps to activate.`,
+      heading:    `You're in. Here's your license key.`,
+      bodyHtml,
+      footerNote: d.manageCopy
+    }),
+    text,
+    replyTo:    "support@trysmartcut.com"
+  });
+}
+
+// ─── Email 2: subscription canceled ─────────────────────────────────────────
+// Fires the moment Paddle's subscription.canceled webhook arrives. Users
+// keep access until expiresAt (the end of their current billing period)
+// — we just want to (a) confirm the cancellation for their records and
+// (b) give them a frictionless way to resubscribe if they change their
+// mind. Standard in top-tier SaaS (Linear, Raycast, Cron, etc.).
+async function sendCancellationEmail(env, to, { licenseKey, plan, expiresAt }) {
+  const d       = planDetails(plan);
+  const endDate = formatHumanDate(expiresAt);
+  const subj    = `Your SmartCut subscription has been canceled`;
+  const resubLink = "https://trysmartcut.com/?plan=" + (plan === "annual" ? "annual" : "monthly") + "#pricing";
+
+  const accessBlock = endDate ? `
+    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin:20px 0;border:1px solid #27272a;border-radius:10px;background:#09090b;">
+      <tr><td style="padding:16px 22px;">
+        <div style="font-size:11px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#71717a;margin-bottom:6px;">Access continues until</div>
+        <div style="font-size:18px;font-weight:600;color:#fafafa;">${endDate}</div>
+        <div style="font-size:12.5px;color:#71717a;margin-top:6px;">You paid through the end of the current billing period — nothing changes until then.</div>
+      </td></tr>
+    </table>` : "";
+
+  const bodyHtml = `
+    <p style="margin:0 0 12px;">Your <b style="color:#fafafa;">${d.label}</b> subscription has been canceled. No more charges will be made.</p>
+    ${accessBlock}
+    <p style="margin:16px 0 8px;">After that date, your license (<span style="font-family:'SFMono-Regular',Menlo,Monaco,Consolas,monospace;color:#a1a1aa;">${licenseKey}</span>) will stop activating in Premiere. If you resubscribe later, we'll reuse the same key automatically.</p>
+    <p style="margin:16px 0 0;color:#a1a1aa;font-size:13.5px;">If you canceled by accident, you can resubscribe in one click — we keep your old key reserved for 30 days.</p>`;
+
+  const text = [
+    `Your SmartCut subscription has been canceled.`,
+    ``,
+    `Plan: ${d.label}`,
+    endDate ? `Access continues until: ${endDate}` : "",
+    ``,
+    `After that date, license key ${licenseKey} will stop activating in`,
+    `Premiere. If you resubscribe later, we'll reuse the same key.`,
+    ``,
+    `Resubscribe: ${resubLink}`,
+    ``,
+    `If something about SmartCut didn't work for you, we'd genuinely love`,
+    `to hear why — just reply to this email.`,
+    ``,
+    `— The SmartCut team`
+  ].filter(Boolean).join("\n");
+
+  await sendResendEmail(env, {
+    to,
+    subject: subj,
+    html:    renderEmailShell({
+      preheader:  `No more charges. You keep access until ${endDate || "the end of the current billing period"}.`,
+      heading:    `Sorry to see you go.`,
+      bodyHtml,
+      ctaHref:    resubLink,
+      ctaLabel:   `Resubscribe`,
+      footerNote: `If something didn't work for you, we'd genuinely love to hear why — just reply to this email. We read every one.`
+    }),
+    text,
+    replyTo: "support@trysmartcut.com"
+  });
 }
 
 // ─── /admin/release ─────────────────────────────────────────────────────────
@@ -631,9 +1649,25 @@ async function handleAdminRelease(req, env) {
   return json({ ok: true, version: body.version });
 }
 
+// ─── /admin/recovery-sweep ──────────────────────────────────────────────────
+// Runs the abandoned-cart sweep on demand. Useful for:
+//   • Testing the whole flow without waiting an hour for cron
+//   • Manual backfill after deploying cron for the first time
+//   • Monitoring — returns scanned/sent/skipped counts in the response
+//
+// Header: Authorization: Bearer <ADMIN_TOKEN>
+async function handleAdminRecoverySweep(req, env) {
+  const auth = req.headers.get("Authorization") || "";
+  if (auth !== `Bearer ${env.ADMIN_TOKEN}`) {
+    return json({ ok: false, reason: "unauthorized" }, 401);
+  }
+  const result = await sweepAbandonedCarts(env);
+  return json({ ok: true, ...result });
+}
+
 // ─── /admin/grant ───────────────────────────────────────────────────────────
 // Manually mint a license — useful for comp copies, press, support
-// overrides, or lifetime upgrades that weren't processed through Stripe.
+// overrides, or lifetime upgrades that weren't processed through Paddle.
 //
 // Header: Authorization: Bearer <ADMIN_TOKEN>
 // Body:   { email, plan: "monthly"|"annual"|"lifetime", expiresAt?, activationsMax? }
@@ -674,13 +1708,24 @@ function emptyLicense(licenseKey, env) {
     email: null,
     status: "active",
     plan: null,
+    // provider = which payment processor minted this license. We keep both
+    // Paddle and Stripe id families on the record (most will be null) so
+    // either webhook flow can look up and mutate the same record, and so
+    // switching providers mid-lifecycle (e.g. Paddle → Stripe migration)
+    // doesn't require a schema change.
+    provider: null,              // "paddle" | "stripe"
+    paddleCustomerId: null,
+    paddleSubscriptionId: null,
+    paddleTransactionId: null,
+    paddlePriceId: null,
     stripeCustomerId: null,
     stripeSubscriptionId: null,
+    stripeCheckoutSessionId: null,
     stripePriceId: null,
     createdAt: new Date().toISOString(),
     expiresAt: null,
     machineIds: [],
-    activationsMax: parseInt(env.ACTIVATIONS_MAX || "3", 10)
+    activationsMax: parseInt(env.ACTIVATIONS_MAX || "2", 10)
   };
 }
 
@@ -693,33 +1738,37 @@ async function hmacSha256Hex(secret, message) {
   return [...new Uint8Array(sig)].map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
-// Stripe signature:
-//   Stripe-Signature: t=<unix>,v1=<hex>,v1=<hex>,...
-// Expected = HMAC-SHA256(secret, "<t>.<rawBody>")
-// Accept if any v1 in the header matches. Reject if timestamp is >5min
-// old to block replay attacks.
-async function verifyStripeSignature(body, header, secret) {
+// Paddle signature (Paddle Billing / webhook v1):
+//
+//   Paddle-Signature: ts=1704805940;h1=abc123...
+//
+// Expected = HMAC-SHA256(secret, `${ts}:${rawBody}`)
+// Reject if timestamp is >5 min old to block replay attacks.
+//
+// Multiple h1 entries can coexist during key rotation — accept if ANY match.
+async function verifyPaddleSignature(body, header, secret) {
   if (!header || !secret) return false;
-  const parts = Object.fromEntries(
-    header.split(",").map(p => {
-      const [k, v] = p.trim().split("=");
-      return [k, v];
-    })
-  );
-  if (!parts.t || !parts.v1) return false;
+
+  // Parse the semicolon-delimited key=value parts.
+  const parts = {};
+  const h1s   = [];
+  for (const seg of header.split(";")) {
+    const idx = seg.indexOf("=");
+    if (idx <= 0) continue;
+    const k = seg.slice(0, idx).trim();
+    const v = seg.slice(idx + 1).trim();
+    if (k === "h1") h1s.push(v);
+    else parts[k] = v;
+  }
+
+  if (!parts.ts || h1s.length === 0) return false;
 
   const now = Math.floor(Date.now() / 1000);
-  const ts  = parseInt(parts.t, 10);
+  const ts  = parseInt(parts.ts, 10);
   if (!ts || Math.abs(now - ts) > 300) return false;
 
-  const expected = await hmacSha256Hex(secret, `${parts.t}.${body}`);
-
-  // Stripe can put multiple v1= entries in the header; re-parse manually.
-  const v1s = header.split(",")
-    .map(p => p.trim())
-    .filter(p => p.startsWith("v1="))
-    .map(p => p.slice(3));
-  for (const candidate of v1s) {
+  const expected = await hmacSha256Hex(secret, `${parts.ts}:${body}`);
+  for (const candidate of h1s) {
     if (timingSafeEqual(expected, candidate)) return true;
   }
   return false;

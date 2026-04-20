@@ -7,7 +7,7 @@ compatibility_date = "2025-12-01"
 # then paste the returned id here.
 [[kv_namespaces]]
 binding = "LICENSES"
-id = "REPLACE_WITH_KV_ID"
+id = "21df762017314daf8a2238f62dab7af4"
 
 # R2 bucket for hosting signed .zxp downloads. Run:
 #   wrangler r2 bucket create smartcut-releases
@@ -18,29 +18,65 @@ binding = "RELEASES"
 bucket_name = "smartcut-releases"
 
 # ─── Secrets — set via `wrangler secret put <NAME>` ────────────────────────
-# STRIPE_SECRET_KEY         Stripe secret key (sk_live_… or sk_test_…)
-# STRIPE_WEBHOOK_SECRET     Endpoint signing secret shown when you create
-#                           the /webhook/stripe endpoint in Dashboard
+# STRIPE_API_KEY            Server-side secret key (sk_test_… or sk_live_…)
+# STRIPE_WEBHOOK_SECRET     Signing secret shown when you create the webhook
+#                           endpoint in Stripe Dashboard → Developers → Webhooks
+# PADDLE_API_KEY            Server-side API key (pdl_sdbx_apikey_… or pdl_apikey_…)
+# PADDLE_WEBHOOK_SECRET     Endpoint secret shown when you create the notification
+#                           destination in Paddle Dashboard → Notifications
 # DOWNLOAD_SIGNING_KEY      Any random 32+ char string (signs ZXP URLs)
 # ADMIN_TOKEN               Bearer token for /admin/* routes
 # RESEND_API_KEY            Optional — enables license-key emails on purchase
 # ───────────────────────────────────────────────────────────────────────────
 
 [vars]
-ACTIVATIONS_MAX      = "3"
+ACTIVATIONS_MAX      = "2"
 DOWNLOAD_URL_TTL_SEC = "600"
 
+# ─── Abandoned-cart recovery ───────────────────────────────────────────────
+# We layer our own recovery email on top of Paddle's built-in 60-min one.
+# Paddle does the first touch (configure at ~15-20% in Paddle Dashboard →
+# Checkout → Recovery). Our worker does the second touch at T+72h with a
+# bigger, single-use discount code for people who ignored Paddle's first
+# nudge. Tune the window / discount here without redeploying.
+RECOVERY_MIN_AGE_HOURS    = "72"   # earliest we'll send (after Paddle's 60-min)
+RECOVERY_MAX_AGE_HOURS    = "168"  # latest we'll send (7d — beyond that, stop)
+RECOVERY_DISCOUNT_PERCENT = "33"   # Paddle research shows 10-20% converts
+                                   # best; we go deeper because we're second
+                                   # touch on already-cold leads.
+
 # ─── Stripe price IDs ──────────────────────────────────────────────────────
-# Fill in after creating the three Products in the Stripe Dashboard.
-# The webhook uses these to tell which plan a buyer picked.
+# Copy these from Stripe Dashboard → Product catalog → <product> → Pricing
+# section → the "price_…" id next to each price. The webhook uses these to
+# tell which plan a buyer picked.
+#
+# Note: Stripe doesn't have a "sandbox" concept — test vs live is chosen
+# by the STRIPE_API_KEY prefix (sk_test_… vs sk_live_…). Use test-mode
+# price ids here while STRIPE_API_KEY is sk_test_…; swap both sets when
+# going live. Test and live price ids look identical ("price_…"), they're
+# just scoped separately.
 #   Monthly : $29.99/mo   recurring
 #   Annual  : $199/yr     recurring
 #   Lifetime: $49         one-time (launch special)
-STRIPE_PRICE_MONTHLY  = "price_1TO7JlDyr8pwlym5YneEuQk3"
-STRIPE_PRICE_ANNUAL   = "price_1TO7LUDyr8pwlym5j5yvmWQe"
-STRIPE_PRICE_LIFETIME = "price_1TO7M8Dyr8pwlym5fP1iqkvr"
+STRIPE_PRICE_MONTHLY  = "price_1TODEuReFtiPsKaWp3c7DFXd"
+STRIPE_PRICE_ANNUAL   = "price_1TODE8ReFtiPsKaWlXAlOVFR"
+STRIPE_PRICE_LIFETIME = "price_1TODDXReFtiPsKaWjurRsh9t"
 
-# Where users land after closing the Billing Portal.
+# ─── Paddle environment (fallback provider) ────────────────────────────────
+# Only matters when the landing page's CHECKOUT_PROVIDER is flipped back
+# to paddle. Otherwise ignored.
+# "sandbox"    → worker talks to https://sandbox-api.paddle.com
+# "production" → worker talks to https://api.paddle.com
+# Flip this (and rotate the three Price IDs + secrets) when you go live.
+PADDLE_ENV            = "sandbox"
+
+# ─── Paddle price IDs (fallback provider) ──────────────────────────────────
+# Copy from Paddle Dashboard → Catalog → <product> → Prices tab → "Copy ID".
+PADDLE_PRICE_MONTHLY  = "pri_01kpmpabeswgbdgqa7eh9y5055"
+PADDLE_PRICE_ANNUAL   = "pri_01kpmpet1eywtznbejem9sj2v9"
+PADDLE_PRICE_LIFETIME = "pri_01kpmpjawbnj8yxmm32qmmc2dz"
+
+# Where users land after closing the Customer Portal.
 PORTAL_RETURN_URL    = "https://trysmartcut.com/thanks"
 
 # From address for license-key emails via Resend.
@@ -54,8 +90,15 @@ LATEST_RELEASED_AT   = "2026-04-18T00:00:00Z"
 
 # ─── Lifetime launch-window caps ───────────────────────────────────────────
 # The lifetime deal ends when EITHER of these two triggers first.
-# The landing page reads these via /stripe/lifetime-stats and mirrors them.
-# LIFETIME_CAP must match the "Limit number of payments" you set on the
-# Lifetime Payment Link inside the Stripe Dashboard.
+# The landing page reads these via /lifetime-stats and mirrors them.
 LIFETIME_CAP         = "1000"
 LIFETIME_LAUNCH_END  = "2026-05-09T23:59:59Z"
+
+# ─── Cron Triggers ─────────────────────────────────────────────────────────
+# Runs the scheduled() handler in src/index.js on this schedule.
+#   "0 * * * *" = every hour on the hour
+# The only current job is abandoned-cart recovery; add more crons here if
+# you want periodic maintenance (e.g. KV cleanup, daily reports).
+# Free-tier accounts can run cron triggers at 5-min+ intervals.
+[triggers]
+crons = ["0 * * * *"]

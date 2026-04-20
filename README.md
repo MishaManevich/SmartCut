@@ -155,7 +155,7 @@ Premiere Pro sequence
 - **Windows support**: the codebase is portable; need to build the Windows whisper binary (`whisper-cli.exe`) and bundle under `bin/whisper/win-x64/`.
 - **Intel Mac support**: build x86_64 whisper-cli and drop under `bin/whisper/macos-x64/`.
 - **Proper code signing**: macOS Gatekeeper needs the binary signed with a Developer ID before the ZXP ships to customers. The installer currently strips the quarantine attribute in dev.
-- **Stripe wire-up**: license key is currently validated locally by format match.
+- **Paddle wire-up**: license key is currently validated locally by format match.
 - **Landing page + license server**: draft in `../installer-source/smartcut-installer/`.
 
 ---
@@ -213,9 +213,9 @@ Your source has multiple clips sharing the same bounds. File an issue with the `
 - [ ] Run **Test Cut** on a fresh project → must return `SUCCESS`.
 - [ ] Run full analyze+apply on a 3-minute MOV → should cut 5–15 silences without complaints.
 - [ ] Verify `autoThreshold` populates the noise-floor info card.
-- [ ] Deploy the license worker (see `tools/license-worker/README.md` and `STRIPE-SETUP.md`).
-- [ ] Update `client/lib/License.js → BACKEND_BASE`, `PRICING_URL`, and the three `CHECKOUT_LINKS`.
-- [ ] Create Stripe products + Payment Links for monthly / annual / lifetime.
+- [ ] Deploy the license worker (see `tools/license-worker/README.md` and `PADDLE-SETUP.md`).
+- [ ] Update `client/lib/License.js → BACKEND_BASE` and `PRICING_URL`.
+- [ ] Create Paddle products + prices for monthly / annual / lifetime.
 - [ ] Build and sign the `.zxp` (`npm run build:zxp`) and upload to R2.
 - [ ] POST to `/admin/release` to publish the version.
 
@@ -225,11 +225,13 @@ Your source has multiple clips sharing the same bounds. File an issue with the `
 
 SmartCut ships with a small Cloudflare Worker that:
 
-- Listens for **Stripe** webhooks so license keys land in KV automatically at checkout, renewal, cancel, and refund.
+- Listens for **Paddle** webhooks so license keys land in KV automatically at checkout, renewal, cancel, and refund.
 - Emails the license key to the buyer via Resend right after purchase.
 - Verifies `POST /verify` calls from the panel (machine-bound activation with a cap).
 - Hands the panel a short-lived **signed download URL** for the latest `.zxp` via `POST /download-url` — license-gated, so unpaid users can never grab the installer.
-- Mints one-click **Stripe Billing Portal** sessions via `POST /portal-url` so "Manage subscription" in the panel opens straight into the user's account.
+- Mints one-click **Paddle Customer Portal** sessions via `POST /portal-url` so "Manage subscription" in the panel opens straight into the user's account.
+
+Paddle acts as the **Merchant of Record**, which means Paddle (not us) is the legal seller to the customer. They handle global sales-tax / VAT compliance, fraud screening, and chargebacks. In exchange for a ~5% + $0.50 per-transaction fee, we get zero tax paperwork and immunity from the chargeback churn that killed our previous Stripe account.
 
 Pricing (launch):
 
@@ -239,12 +241,12 @@ Pricing (launch):
 | Annual   | $199/year       |
 | Lifetime | $49 one-time    |
 
-Full setup (KV, R2, Stripe Dashboard, webhook, Payment Links, billing portal) is in [`tools/license-worker/STRIPE-SETUP.md`](tools/license-worker/STRIPE-SETUP.md).
+Full setup (KV, R2, Paddle Dashboard, webhooks, customer portal) is in [`tools/license-worker/PADDLE-SETUP.md`](tools/license-worker/PADDLE-SETUP.md).
 
-### Why a Worker and not Stripe-direct
+### Why a Worker and not Paddle-direct
 
-Hitting Stripe directly from the panel would leak the download URL and make payment-provider swaps painful. The Worker gives us:
+Hitting Paddle directly from the panel would leak the download URL and make payment-provider swaps painful. The Worker gives us:
 
 1. **Gated downloads** — only active licenses get a signed URL to the `.zxp`.
-2. **Provider portability** — swap Stripe for anything else by replacing one handler, no CEP re-release.
+2. **Provider portability** — swap Paddle for anything else by replacing one handler, no CEP re-release.
 3. **One place** for activation caps, offline grace, deactivate flow, refund handling, comp grants.
