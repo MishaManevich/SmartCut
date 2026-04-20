@@ -65,7 +65,11 @@ var PRESETS = {
     autoThreshold:  true
   },
   podcast: {
-    label:          "Podcast",
+    // Internal key stays "podcast" so saved settings from older builds still
+    // load. User-facing label is "Long Form" — covers podcasts, interviews,
+    // tutorials, and any other conversational long-form content where the
+    // snappy Short Form preset would cut too aggressively.
+    label:          "Long Form",
     sensitivity:     3,
     threshold:      -45,
     minDuration:    500,
