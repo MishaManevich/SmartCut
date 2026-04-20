@@ -162,3 +162,24 @@ CSInterface.prototype.closeExtension = function () {
     __adobe_cep__.closeExtension();
   }
 };
+
+// ─── Open URL in system browser (required for checkout / pricing links) ─────
+
+CSInterface.prototype.openURLInDefaultBrowser = function (url) {
+  if (!url) return;
+  try {
+    if (typeof cep !== "undefined" && cep.util && typeof cep.util.openURLInDefaultBrowser === "function") {
+      cep.util.openURLInDefaultBrowser(url);
+      return;
+    }
+  } catch (e) {}
+  try {
+    if (typeof __adobe_cep__ !== "undefined" && typeof __adobe_cep__.openURLInDefaultBrowser === "function") {
+      __adobe_cep__.openURLInDefaultBrowser(url);
+      return;
+    }
+  } catch (e2) {}
+  try {
+    window.open(url, "_blank");
+  } catch (e3) {}
+};

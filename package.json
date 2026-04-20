@@ -8,7 +8,8 @@
     "fetch:model":    "node tools/fetch-model.js",
     "make-cert":      "./tools/make-cert.sh",
     "build:zxp":      "./tools/build-zxp.sh",
-    "release":        "npm run build:zxp"
+    "build:mac-dmg":  "./tools/build-mac-dmg.sh",
+    "release":        "npm run build:zxp && npm run build:mac-dmg"
   },
   "devDependencies": {
     "@huggingface/transformers": "^3.0.2",

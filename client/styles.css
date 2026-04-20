@@ -11,23 +11,27 @@
   --text-secondary: #999999;
   --text-muted: #666666;
 
-  /* Brand accent: SmartCut orange.
-     The variable names below are kept (--cyan, --cyan-dim, --cyan-hover)
-     so we don't have to touch 50+ selectors, but the VALUES are now orange
-     to stay in lockstep with the trysmartcut.com landing page + OG image.
-     Do NOT rename these — just update the hex here if the brand shifts. */
+  /* Brand — orange (matches trysmartcut.com): logo wordmark, primary buttons. */
   --brand:        #f97316;
   --brand-hover:  #fb923c;
   --brand-deep:   #ea580c;
   --brand-dim:    rgba(249, 115, 22, 0.15);
 
-  --cyan:         var(--brand);
-  --cyan-hover:   var(--brand-hover);
-  --cyan-dim:     var(--brand-dim);
+  /* Data / results — cool teal so cuts, hero metrics, and selection state
+     contrast with brand orange instead of blending into one hot color. */
+  --data-accent:       #2dd4bf;
+  --data-accent-hover: #5eead4;
+  --data-accent-dim:   rgba(45, 212, 191, 0.14);
+  --data-accent-deep:  #0d9488;
+
+  /* Legacy names (wide use in selectors) → data teal */
+  --cyan:         var(--data-accent);
+  --cyan-hover:   var(--data-accent-hover);
+  --cyan-dim:     var(--data-accent-dim);
 
   --amber: #f5a623;
   --red:   #e74c3c;
-  --green: #27ae60;
+  --green: #22c55e;
   --radius: 6px;
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
@@ -69,7 +73,13 @@ body {
   gap: 8px;
 }
 
-.logo-icon { color: var(--cyan); }
+.logo-icon { flex-shrink: 0; }
+
+/* Match landing site Navbar blade orientation */
+.logo-blade {
+  transform: rotate(45deg);
+  transform-origin: center;
+}
 
 .logo-text {
   font-size: 14px;
@@ -77,14 +87,14 @@ body {
   letter-spacing: -0.3px;
 }
 
-.accent { color: var(--cyan); }
+.accent { color: var(--brand); }
 
 .version-badge {
   font-size: 10px;
   padding: 2px 8px;
   border-radius: 10px;
-  background: var(--cyan-dim);
-  color: var(--cyan);
+  background: var(--bg-hover);
+  color: var(--text-secondary);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -431,7 +441,7 @@ body {
 }
 
 .preset-btn.active:hover {
-  background: rgba(249, 115, 22, 0.22);
+  background: rgba(45, 212, 191, 0.22);
 }
 
 .preset-icon {
@@ -582,7 +592,7 @@ input[type="range"]::-webkit-slider-thumb:hover { background: var(--cyan-hover);
 }
 
 .btn-auto.active:hover {
-  background: rgba(249, 115, 22, 0.22);
+  background: rgba(45, 212, 191, 0.22);
 }
 
 .auto-threshold-info {
@@ -637,12 +647,12 @@ input[type="range"]::-webkit-slider-thumb:hover { background: var(--cyan-hover);
 .btn-half { flex: 1; }
 
 .btn-primary {
-  background: var(--cyan);
+  background: var(--brand);
   color: #0a0a0a;
   font-weight: 600;
   padding: 10px 16px;
 }
-.btn-primary:hover { background: var(--cyan-hover); }
+.btn-primary:hover { background: var(--brand-hover); }
 .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .btn-accent {
@@ -734,7 +744,7 @@ input[type="range"]::-webkit-slider-thumb:hover { background: var(--cyan-hover);
 
 .progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, var(--brand), var(--brand-deep));
+  background: linear-gradient(90deg, var(--data-accent), var(--data-accent-deep));
   border-radius: 2px;
   width: 0%;
   transition: width 0.3s;
@@ -748,10 +758,10 @@ input[type="range"]::-webkit-slider-thumb:hover { background: var(--cyan-hover);
 .cut-hero {
   background: linear-gradient(
     140deg,
-    var(--cyan-dim) 0%,
+    var(--data-accent-dim) 0%,
     var(--bg-tertiary) 85%
   );
-  border: 1px solid var(--cyan);
+  border: 1px solid rgba(45, 212, 191, 0.35);
   border-radius: var(--radius);
   padding: 10px 12px;
   margin-bottom: 10px;
@@ -1176,8 +1186,8 @@ input[type="range"]::-webkit-slider-thumb:hover { background: var(--cyan-hover);
   gap: 10px;
   margin: 8px 14px 0;
   padding: 8px 12px;
-  background: rgba(249, 115, 22, 0.08);
-  border: 1px solid var(--cyan-dim);
+  background: var(--data-accent-dim);
+  border: 1px solid rgba(45, 212, 191, 0.28);
   border-radius: var(--radius);
   font-size: 11px;
   color: var(--text-primary);
@@ -1209,7 +1219,7 @@ input[type="range"]::-webkit-slider-thumb:hover { background: var(--cyan-hover);
   align-items: center;
   margin-bottom: 12px;
 }
-.about-header h3 { font-size: 14px; margin: 0; color: var(--cyan); }
+.about-header h3 { font-size: 14px; margin: 0; color: var(--brand); }
 /* Top summary line — the single most useful fact (trial days left,
    renewal date, or "not activated") shown large above the details grid. */
 .about-summary {

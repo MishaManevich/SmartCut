@@ -60,6 +60,8 @@ This:
 
 Quit and relaunch Premiere Pro, then open **Window → Extensions → SmartCut**.
 
+That menu path is exactly how customers open the panel too — the only difference is **how the extension gets onto their machine**: you use `install-dev.sh` (unsigned copy); they install a **signed `.zxp`** (see **`RELEASE.md`**). Commercial panels (AutoCut-style) use the same `.zxp` model.
+
 ### 2. Debug the panel
 
 - Chrome devtools for the panel UI: open Chrome at **http://localhost:8088**

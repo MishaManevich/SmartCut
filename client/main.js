@@ -157,13 +157,16 @@ function checkLicense() {
   if (result.ok) {
     showMain();
     if (result.kind === "full") {
-      badge("Active", "#f97316");
+      badge("Active", "#22c55e");
       // Silently refresh lastCheckAt in the background if it's been >1 day.
       // This keeps the OFFLINE_GRACE_DAYS wall invisible for anyone who's
       // ever online — only true offline streaks ever hit it.
       if (typeof License.maybeBackgroundRevalidate === "function") {
         License.maybeBackgroundRevalidate();
       }
+      // Keep the standalone updater in sync on every successful startup
+      // (handles plan changes, machineId migrations, new BACKEND_BASE, …).
+      try { syncCredentialsToUpdater(); } catch (e) {}
     } else {
       badge("Active Trial", "#f5a623");
     }
@@ -197,25 +200,48 @@ function activateLicense() {
       return;
     }
     showMain();
-    badge("Active", "#f97316");
+    badge("Active", "#22c55e");
     status("License activated" + (res.email ? " \u00b7 " + res.email : ""));
+    // Seed the standalone updater with this license so the user can run
+    // "SmartCut Updater.app" from /Applications later without re-entering
+    // anything. Best-effort — no-op if Node / helper app is missing.
+    try { syncCredentialsToUpdater(); } catch (e) {}
   });
 }
 
-function startTrial() {
-  var res = License.startTrial();
-  if (!res.ok) {
-    var err = document.getElementById("licenseError");
-    err.textContent = res.message;
-    err.style.display = "block";
-    return;
+// Writes the current license key + machineId into the shared updater config
+// file (~/Library/Application Support/SmartCut/updater.json). The helper
+// app reads this on standalone launches. We also call the helper once in
+// "prime" mode via the same arg path — that path tolerates the app not
+// being installed yet.
+function syncCredentialsToUpdater() {
+  if (!window.License) return;
+  var info = License.info();
+  if (!info || info.kind !== "full" || !info.key) return;
+  try {
+    var fs   = require("fs");
+    var path = require("path");
+    var os   = require("os");
+    var dir  = path.join(os.homedir(), "Library/Application Support/SmartCut");
+    fs.mkdirSync(dir, { recursive: true });
+    var file = path.join(dir, "updater.json");
+    fs.writeFileSync(file, JSON.stringify({
+      licenseKey: info.key,
+      machineId:  info.machineId,
+      backend:    (window.License && License.BACKEND_BASE) || null
+    }), { mode: 0o600 });
+  } catch (e) {}
+}
+
+// Opens trysmartcut.com with ?plan=annual — Stripe/Paddle trial (if enabled) lives on the Annual product, not in-panel.
+function startAnnualCheckout() {
+  var err = document.getElementById("licenseError");
+  if (err) {
+    err.textContent = "";
+    err.style.display = "none";
   }
-  showMain();
-  var info = License.check();
-  if (info.ok && info.kind === "trial") {
-    badge("Active Trial", "#f5a623");
-  }
-  status("Trial started");
+  openCheckoutFor("annual");
+  try { status("Opening Annual plan in your browser\u2026"); } catch (e) {}
 }
 
 function useTrial() {
@@ -228,6 +254,7 @@ function useTrial() {
 }
 
 function showLicense(msg) {
+  setActivationBadge();
   document.getElementById("licensePanel").style.display = "block";
   document.getElementById("mainPanel").style.display    = "none";
   if (typeof stopScopePolling === "function") stopScopePolling();
@@ -247,6 +274,17 @@ function badge(t, c) {
   b.style.cursor = "pointer";
   b.title = "Click for license details";
   b.onclick = showAboutPanel;
+}
+
+function setActivationBadge() {
+  var b = document.getElementById("licenseBadge");
+  if (!b) return;
+  b.textContent = "Activate";
+  b.style.color = "#a1a1aa";
+  b.style.background = "rgba(161, 161, 170, 0.18)";
+  b.style.cursor = "default";
+  b.title = "";
+  b.onclick = null;
 }
 
 // Open the main pricing page (trysmartcut.com/pricing) where all three plans
@@ -283,6 +321,7 @@ function openManagePage() {
   try { status("Opening billing portal…"); } catch (e) {}
 
   License.requestPortalUrl().then(function (res) {
+    try { status(""); } catch (e2) {}
     if (res && res.ok && res.url) {
       Updater.openReleasePage(res.url);
       return;
@@ -290,8 +329,15 @@ function openManagePage() {
     // No sub (lifetime) or network error → fall back.
     Updater.openReleasePage(License.MANAGE_URL || License.PRICING_URL || License.BUY_URL);
   }).catch(function () {
+    try { status(""); } catch (e2) {}
     Updater.openReleasePage(License.MANAGE_URL || License.PRICING_URL || License.BUY_URL);
   });
+}
+
+function openSupportEmail() {
+  if (!window.Updater) return;
+  try { status(""); } catch (e) {}
+  Updater.openReleasePage("mailto:support@trysmartcut.com?subject=SmartCut%20support");
 }
 
 function copyMachineIdToClipboard() {
@@ -393,7 +439,12 @@ function showAboutPanel() {
   if (actions) {
     var buttons = "";
     if (kind === "full") {
-      buttons += '<button class="btn-ghost" onclick="openManagePage()">Manage Subscription</button>';
+      // Subscriptions (monthly/annual) get a real portal; lifetime is one-time — no Stripe sub to manage.
+      if (info.expiresAt) {
+        buttons += '<button class="btn-ghost" onclick="openManagePage()">Manage Subscription</button>';
+      } else {
+        buttons += '<button class="btn-ghost" onclick="openSupportEmail()">Email support</button>';
+      }
       buttons += '<button class="btn-ghost btn-danger" onclick="deactivateLicense()">Deactivate on this Mac</button>';
     } else if (kind === "trial") {
       buttons += '<button class="btn-primary" onclick="openPurchasePage()">Buy SmartCut</button>';
@@ -441,10 +492,32 @@ function dismissUpdateBanner() {
   if (b) b.style.display = "none";
 }
 
-// Requests a signed, short-lived download URL from the license server.
-// If the caller is on trial / no license, show the buy page instead.
+// Primary path: hand off to the SmartCut Updater.app so the update can run
+// outside Premiere Pro (downloads the payload, replaces the extension
+// folder, and prompts the user to restart). Falls back to the signed-URL
+// browser download when the helper isn't installed (dev / very old
+// customers) or when the user has no full license.
 function openUpdatePage() {
   if (!window.Updater) return;
+  var info = (window.License && License.info) ? License.info() : {};
+  var kind = info.kind;
+
+  if (kind === "full" && info.key) {
+    var res = Updater.runHelperApp({
+      licenseKey: info.key,
+      machineId:  info.machineId,
+      backend:    (window.License && License.BACKEND_BASE) || null
+    });
+    if (res && res.ok) {
+      status("Opening SmartCut Updater\u2026");
+      dismissUpdateBanner();
+      return;
+    }
+    // Helper not present — fall back to the legacy browser download. Note
+    // this still hits the signed /download-url endpoint, so the gate holds.
+    derr && derr("[SmartCut] Updater.app not found, falling back to browser DL: " + (res && res.reason));
+  }
+
   status("Requesting download link\u2026");
   Updater.downloadLatest().then(function (res) {
     if (res.ok) {
@@ -1362,7 +1435,19 @@ function analyzeSequence() {
             throw err;
           })
           .then(function (audio) {
-            var silenceResult = analyzer._analyzeSamples(audio);
+            var pctClip = decodeBudgetStart +
+              Math.round((decodeBudgetEnd - decodeBudgetStart) * (i / clips.length));
+            var pctNext = decodeBudgetStart +
+              Math.round((decodeBudgetEnd - decodeBudgetStart) * ((i + 1) / clips.length));
+
+            function reportAnalyze(t) {
+              var p = pctClip + Math.round((pctNext - pctClip) * t);
+              progress(p, "Analyzing \u2018" + clip.clipName + "\u2019 (" +
+                (i + 1) + "/" + clips.length + ")\u2026");
+            }
+
+            return Promise.resolve(analyzer._analyzeSamples(audio, reportAnalyze))
+              .then(function (silenceResult) {
             if (silenceResult.autoThreshold && !autoThreshold) {
               autoThreshold = silenceResult.autoThreshold;
             }
@@ -1398,6 +1483,7 @@ function analyzeSequence() {
             if (settings.useTranscription && window.Transcriber) {
               allTranscripts.push({ clip: clip, audio: audio });
             }
+              });
           });
       });
     }, Promise.resolve());
@@ -1411,10 +1497,17 @@ function analyzeSequence() {
       var path = require("path");
       var transcriptResults = [];
 
+      // Progress budget from `decodeBudgetEnd` up to 85% is carved evenly
+      // across the clips being transcribed. Each clip's own whisper progress
+      // (0–100) fills that clip's slice — so a single 15-min clip advances
+      // the outer bar from ~15% all the way to ~85%, not just 2 points
+      // like the old code did (which felt frozen).
+      var transcribeSpan = Math.max(0, 85 - decodeBudgetEnd);
+      var clipSpan       = transcribeSpan / Math.max(1, allTranscripts.length);
+
       var whisperChain = allTranscripts.reduce(function (chain, entry, i) {
         return chain.then(function () {
-          var pct = decodeBudgetEnd +
-                    Math.round((85 - decodeBudgetEnd) * (i / allTranscripts.length));
+          var pct = decodeBudgetEnd + Math.round(clipSpan * i);
           progress(pct, "Transcribing \u2018" + entry.clip.clipName + "\u2019 (" +
                         (i + 1) + "/" + allTranscripts.length + ")\u2026");
 
@@ -1430,10 +1523,13 @@ function analyzeSequence() {
 
           return Transcriber.transcribe(tmpWav, {
             onProgress: function (wpct, msg) {
-              var base = pct;
-              progress(base + Math.round((2) * (wpct / 100)), msg);
+              progress(pct + Math.round(clipSpan * (wpct / 100)), msg);
             },
-            onLog: function (line) { dbg("[whisper]", line); }
+            onLog: function (line) { dbg("[whisper]", line); },
+            // Greedy decoder instead of beam search — ~1.5x faster on long
+            // clips with negligible accuracy hit for clean speech. This is
+            // the same tradeoff OpenAI's faster-whisper makes by default.
+            beam: false
           }).then(function (transcript) {
             try { require("fs").unlinkSync(tmpWav); } catch (e) {}
             transcriptResults.push({ clip: entry.clip, transcript: transcript });

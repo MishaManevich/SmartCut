@@ -49,7 +49,9 @@ Do this **three times**, one per plan:
 3. **Advanced settings**:
    - **Collect customer addresses**: Billing only (for tax compliance — you need this even if you don't currently charge tax).
    - **Automatic tax**: ON if you've set up Stripe Tax; OFF otherwise. Can flip this later.
-   - **Allow promotion codes**: ON.
+   - **Allow promotion codes**:
+     - **Monthly** and **Annual** links: **ON** if you want coupons / recovery-style discounts on subscriptions.
+     - **Lifetime** link: **OFF** so the launch price (e.g. $49) is never stacked with codes — revenue recovery in the worker also skips lifetime (subscriptions only).
    - **Save payment details for future use**: only applies to recurring; ON is fine.
 4. Click **Create link**. Copy the `https://buy.stripe.com/…` URL.
 

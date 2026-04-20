@@ -14,6 +14,9 @@ dist/
 client/lib/transformers.bundle.js
 bin/ort-wasm/ort-wasm-simd-threaded.jsep.wasm
 
+# macOS Developer ID + notary (local only)
+tools/macos-signing.env
+
 # Signing material (never commit private keys or certs)
 signing/
 *.p12
@@ -33,3 +36,9 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# Wrangler local dev state (never commit)
+tools/license-worker/.wrangler/
+
+# Adobe ZXP signing CLI — download locally; see tools/build-zxp.sh
+tools/bin/

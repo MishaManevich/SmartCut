@@ -32,6 +32,28 @@
 
   // ── Platform detection ────────────────────────────────────────────────────
 
+  // Pick a reasonable whisper thread count for this host.
+  //
+  // whisper.cpp's upstream default is min(4, hardware_concurrency), which
+  // leaves most of the CPU idle on any modern laptop. Empirically on
+  // Apple Silicon we see near-linear speedup up to ~6–8 threads and then
+  // memory-bandwidth saturation flattens the curve (and extra threads
+  // start causing cache contention + thermal throttling on battery).
+  //
+  // We also leave at least 2 cores free so the Premiere host app stays
+  // responsive — users have Premiere in the foreground while we run.
+  function computeDefaultThreads() {
+    try {
+      var os = require("os");
+      var cores = (os.cpus && os.cpus().length) || 4;
+      var t = Math.max(1, cores - 2);
+      if (t > 8) t = 8;
+      return t;
+    } catch (e) {
+      return 4;
+    }
+  }
+
   function detectPlatform() {
     var os = require("os");
     var platform = os.platform();      // darwin, win32, linux
@@ -137,9 +159,16 @@
         "-pp"                     // print progress to stderr
       ];
 
-      if (typeof opts.threads === "number") {
-        args.push("-t", String(opts.threads));
-      }
+      // Thread count. whisper.cpp's built-in default is min(4, cpuCount)
+      // which leaves most of an 8-10 core Apple Silicon chip idle. If the
+      // caller didn't specify a count, pick a sensible one based on the
+      // host's actual CPU count. We cap at 8 because above that whisper
+      // sees diminishing returns (memory bandwidth bound).
+      var threads = (typeof opts.threads === "number")
+        ? opts.threads
+        : computeDefaultThreads();
+      args.push("-t", String(threads));
+
       if (opts.beam === false) {
         args.push("-bs", "1");    // greedy, faster
       }
@@ -156,6 +185,28 @@
 
       var stderr = "";
       var lastPct = 0;
+      var tStart  = Date.now();
+      var hbTimer = null;
+
+      // If whisper.cpp doesn't emit `-pp` lines (older binary, different
+      // build flags), the bar would freeze for tens of minutes on long
+      // clips even though work is proceeding. Heartbeat keeps the UI honest.
+      if (opts.onProgress) {
+        hbTimer = global.setInterval(function () {
+          var elapsed = Math.round((Date.now() - tStart) / 1000);
+          opts.onProgress(lastPct, "Transcribing " + lastPct + "% (running " + elapsed + "s\u2026)");
+        }, 20000);
+      }
+
+      // Drain stdout. `--no-prints` is passed so whisper shouldn't emit
+      // anything on stdout, but some builds still do (e.g. backend-init
+      // banners). If we never read the pipe, a ~64 KB OS buffer fills up
+      // and the child process blocks on `write()` — presenting as a hang
+      // stuck at an arbitrary progress percentage. We consume and
+      // discard to be safe.
+      if (proc.stdout) {
+        proc.stdout.on("data", function () { /* discard */ });
+      }
 
       proc.stderr.on("data", function (chunk) {
         var txt = chunk.toString("utf8");
@@ -166,21 +217,37 @@
           });
         }
         // whisper emits `whisper_print_progress_callback: progress = NN%`
-        var m = txt.match(/progress\s*=\s*(\d+)%/);
-        if (m && opts.onProgress) {
-          var pct = parseInt(m[1], 10);
-          if (pct > lastPct) {
-            lastPct = pct;
-            opts.onProgress(pct, "Transcribing " + pct + "%");
+        // — often multiple lines arrive in a single chunk when the OS
+        // buffers stderr, so iterate over every match rather than just
+        // the first one (otherwise the UI skips progress ticks).
+        if (opts.onProgress) {
+          var patterns = [
+            /progress\s*=\s*(\d+)\s*%/g,
+            /progress:\s*(\d+)\s*%/gi,
+            /(\d+)\s*%\s*\|\s*[^|]+\|/g
+          ];
+          for (var pi = 0; pi < patterns.length; pi++) {
+            var re = patterns[pi];
+            var m;
+            re.lastIndex = 0;
+            while ((m = re.exec(txt)) !== null) {
+              var pct = parseInt(m[1], 10);
+              if (pct >= 0 && pct <= 100 && pct > lastPct) {
+                lastPct = pct;
+                opts.onProgress(pct, "Transcribing " + pct + "%");
+              }
+            }
           }
         }
       });
 
       proc.on("error", function (err) {
+        if (hbTimer) { try { global.clearInterval(hbTimer); } catch (eHb) {} }
         reject(new Error("whisper-cli spawn failed: " + (err && err.message || err)));
       });
 
       proc.on("close", function (code) {
+        if (hbTimer) { try { global.clearInterval(hbTimer); } catch (eHb2) {} }
         if (code !== 0) {
           reject(new Error("whisper-cli exited " + code + "\n" + stderr.slice(-1000)));
           return;

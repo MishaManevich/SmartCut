@@ -70,13 +70,10 @@
     lifetime: { label: "Lifetime", price: "$49 (launch)",   tagline: "One-time payment, forever" }
   };
 
-  // Dev master keys — activate locally without touching the backend. Remove
-  // or leave intact before shipping; they're only useful while BACKEND_BASE
-  // isn't reachable. Any key matching one of these activates as a full
-  // license bound to the current machine with no expiry.
-  var DEV_MASTER_KEYS = [
-    "SCP-DEV-4F9A-BEEF-CAFE-2026"
-  ];
+  // Dev-only: keys that activate without the backend. MUST stay empty in
+  // builds you ship to customers (any string here is effectively a master license).
+  // For local testing, add a throwaway entry and remove before packaging.
+  var DEV_MASTER_KEYS = [];
 
   var STORAGE_KEY        = "SMARTCUT_LICENSE_V2";
   var LEGACY_KEY         = "smartcut_license";
@@ -377,6 +374,9 @@
       });
     },
 
+    // Legacy in-panel trial (local only). The activation UI now sends buyers to
+    // ?plan=annual on the site for Stripe/Paddle trials. Kept so old trial
+    // envelopes and recordTrialEdit() still behave until those users convert.
     startTrial: function () {
       var env = loadEnvelope();
       if (env && env.trialStart) {

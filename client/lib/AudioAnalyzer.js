@@ -499,7 +499,15 @@
   // Core pipeline: runs over EVERY sample in the buffer (no truncation)
   // ─────────────────────────────────────────────────────────────────────────
 
-  AudioAnalyzer.prototype._analyzeSamples = function (audio) {
+  // `onProgress` (optional): called with a 0..1 fraction while the RMS
+  // energy profile is built. For long clips (talking-head podcasts, 15+
+  // minute takes) the profile pass can hold the JS thread for many seconds
+  // in a tight loop — the UI progress bar would freeze mid-"Analyzing".
+  // When `onProgress` is supplied and the clip is large enough, we chunk
+  // the work with setImmediate / setTimeout(0) so the panel can repaint
+  // and the bar can advance smoothly.
+  AudioAnalyzer.prototype._analyzeSamples = function (audio, onProgress) {
+    var self       = this;
     var samples    = audio.samples;
     var sampleRate = audio.sampleRate;
     var duration   = audio.duration;
@@ -526,49 +534,59 @@
       }
     }
 
-    // Step 1: windowed RMS energy profile
     var windowMs = 20;
-    var profile  = this._energyProfile(samples, sampleRate, windowMs);
+    // ~75s of 16kHz mono — above this, chunk the profile when a progress
+    // callback is watching (main analyze pipeline).
+    var ASYNC_PROFILE_THRESHOLD = 1200000;
 
-    // Step 2: silence regions
-    var silenceRegions = s.detectSilence
-      ? this._detectSilence(profile)
-      : [];
+    function finishWithProfile(profile) {
+      if (typeof onProgress === "function") onProgress(0.88);
 
-    // v8.1: edge refinement disabled by default — it was pushing silence
-    // boundaries OUTWARD (into surrounding speech) by up to 300ms, which
-    // caused sentence ends to be clipped. We now rely on raw silence
-    // detection plus the paddingMs safety margin in the cutter.
-    var naturalCutPoints = [];
-    var refined = silenceRegions.slice(0);
+      var silenceRegions = s.detectSilence
+        ? self._detectSilence(profile)
+        : [];
 
-    // Offset refined regions back to source-absolute time if we trimmed
-    if (s.trimStart) {
-      for (var r = 0; r < refined.length; r++) {
-        refined[r].startSeconds += s.trimStart;
-        refined[r].endSeconds   += s.trimStart;
+      var refined = silenceRegions.slice(0);
+
+      if (s.trimStart) {
+        for (var r = 0; r < refined.length; r++) {
+          refined[r].startSeconds += s.trimStart;
+          refined[r].endSeconds   += s.trimStart;
+        }
       }
+
+      var totalSaved = 0;
+      for (var ri = 0; ri < refined.length; ri++) {
+        totalSaved += (refined[ri].endSeconds - refined[ri].startSeconds);
+      }
+
+      var result = {
+        silenceRegions: refined,
+        badTakes:       [],
+        summary: {
+          totalSilences:              refined.length,
+          totalBadTakes:              0,
+          estimatedTimeSavedSeconds:  Math.round(totalSaved * 10) / 10,
+          audioDuration:              duration,
+          sampleRate:                 sampleRate,
+          decoder:                    audio.decoder || "unknown"
+        }
+      };
+      if (autoThresholdResult) result.autoThreshold = autoThresholdResult;
+      if (typeof onProgress === "function") onProgress(1);
+      return result;
     }
 
-    var totalSaved = 0;
-    for (var ri = 0; ri < refined.length; ri++) {
-      totalSaved += (refined[ri].endSeconds - refined[ri].startSeconds);
+    if (typeof onProgress === "function") onProgress(0.02);
+
+    if (samples.length > ASYNC_PROFILE_THRESHOLD && typeof onProgress === "function") {
+      return self._energyProfileAsync(samples, sampleRate, windowMs, function (t) {
+        onProgress(0.05 + t * 0.80);
+      }).then(finishWithProfile);
     }
 
-    var result = {
-      silenceRegions: refined,
-      badTakes:       [],   // reserved for P2 whisper-based detection
-      summary: {
-        totalSilences:              refined.length,
-        totalBadTakes:              0,
-        estimatedTimeSavedSeconds:  Math.round(totalSaved * 10) / 10,
-        audioDuration:              duration,
-        sampleRate:                 sampleRate,
-        decoder:                    audio.decoder || "unknown"
-      }
-    };
-    if (autoThresholdResult) result.autoThreshold = autoThresholdResult;
-    return result;
+    var profile = self._energyProfile(samples, sampleRate, windowMs);
+    return finishWithProfile(profile);
   };
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -600,6 +618,50 @@
     }
 
     return { rmsDb: rmsDb, timeStamps: timeStamps, windowMs: windowMs };
+  };
+
+  // Same math as _energyProfile but yields the event loop every few
+  // thousand frames so CEP can repaint and callers can update a progress bar.
+  AudioAnalyzer.prototype._energyProfileAsync = function (samples, sampleRate, windowMs, onProgress) {
+    var windowSize = Math.max(1, Math.floor(sampleRate * windowMs / 1000));
+    var hopSize    = Math.max(1, Math.floor(windowSize / 2));
+    var total      = samples.length;
+    if (total < windowSize) {
+      return Promise.resolve({ rmsDb: new Float32Array(0), timeStamps: new Float32Array(0), windowMs: windowMs });
+    }
+    var numFrames = Math.floor((total - windowSize) / hopSize) + 1;
+    var rmsDb     = new Float32Array(numFrames);
+    var timeStamps = new Float32Array(numFrames);
+
+    var defer = (typeof global.setImmediate === "function")
+      ? global.setImmediate
+      : function (fn) { global.setTimeout(fn, 0); };
+
+    var FRAMES_PER_SLICE = 3500;
+    var idx = 0;
+
+    return new Promise(function (resolve, reject) {
+      function slice() {
+        try {
+          var end = Math.min(idx + FRAMES_PER_SLICE, numFrames);
+          for (; idx < end; idx++) {
+            var start = idx * hopSize;
+            var sumSq = 0;
+            for (var j = 0; j < windowSize; j++) {
+              var v = samples[start + j];
+              sumSq += v * v;
+            }
+            var rms = Math.sqrt(sumSq / windowSize);
+            rmsDb[idx]      = rms > 0 ? 20 * Math.log10(rms) : -100;
+            timeStamps[idx] = start / sampleRate;
+          }
+          if (onProgress) onProgress(numFrames ? idx / numFrames : 1);
+          if (idx < numFrames) defer(slice);
+          else resolve({ rmsDb: rmsDb, timeStamps: timeStamps, windowMs: windowMs });
+        } catch (e) { reject(e); }
+      }
+      slice();
+    });
   };
 
   // ─────────────────────────────────────────────────────────────────────────

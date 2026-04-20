@@ -9,10 +9,11 @@ compatibility_date = "2025-12-01"
 binding = "LICENSES"
 id = "21df762017314daf8a2238f62dab7af4"
 
-# R2 bucket for hosting signed .zxp downloads. Run:
+# R2 bucket for macOS .dmg (+ Windows .zxp when shipped). Run:
 #   wrangler r2 bucket create smartcut-releases
-# Upload builds with:
-#   wrangler r2 object put smartcut-releases/SmartCut-1.0.0-mac.zxp --file ./dist/...
+# macOS: upload the DMG from ./tools/build-mac-dmg.sh (worker prefers it over .zxp):
+#   wrangler r2 object put smartcut-releases/SmartCutPro-1.0.0-mac.dmg --file ../../dist/SmartCutPro-1.0.0-mac.dmg
+# Fallback .zxp still works if no DMG is present.
 [[r2_buckets]]
 binding = "RELEASES"
 bucket_name = "smartcut-releases"
@@ -32,6 +33,9 @@ bucket_name = "smartcut-releases"
 [vars]
 ACTIVATIONS_MAX      = "2"
 DOWNLOAD_URL_TTL_SEC = "600"
+# "1" = buyer UX is macOS-only (email, /thanks, /get-install/win blocked).
+# Set to "0" when a Windows .zxp + whisper bundle ships.
+SHIPPING_MACOS_ONLY  = "1"
 
 # ─── Abandoned-cart recovery ───────────────────────────────────────────────
 # We layer our own recovery email on top of Paddle's built-in 60-min one.
@@ -39,6 +43,10 @@ DOWNLOAD_URL_TTL_SEC = "600"
 # Checkout → Recovery). Our worker does the second touch at T+72h with a
 # bigger, single-use discount code for people who ignored Paddle's first
 # nudge. Tune the window / discount here without redeploying.
+#
+# Lifetime is excluded: we never track pending carts or send %-off recovery
+# for one-time lifetime purchases (keeps $49 anchor; use Stripe Link-level
+# "no promotion codes" for lifetime too).
 RECOVERY_MIN_AGE_HOURS    = "72"   # earliest we'll send (after Paddle's 60-min)
 RECOVERY_MAX_AGE_HOURS    = "168"  # latest we'll send (7d — beyond that, stop)
 RECOVERY_DISCOUNT_PERCENT = "33"   # Paddle research shows 10-20% converts
@@ -58,9 +66,9 @@ RECOVERY_DISCOUNT_PERCENT = "33"   # Paddle research shows 10-20% converts
 #   Monthly : $29.99/mo   recurring
 #   Annual  : $199/yr     recurring
 #   Lifetime: $49         one-time (launch special)
-STRIPE_PRICE_MONTHLY  = "price_1TODEuReFtiPsKaWp3c7DFXd"
-STRIPE_PRICE_ANNUAL   = "price_1TODE8ReFtiPsKaWlXAlOVFR"
-STRIPE_PRICE_LIFETIME = "price_1TODDXReFtiPsKaWjurRsh9t"
+STRIPE_PRICE_MONTHLY  = "price_1TO7JlDyr8pwlym5YneEuQk3"
+STRIPE_PRICE_ANNUAL   = "price_1TO7LUDyr8pwlym5j5yvmWQe"
+STRIPE_PRICE_LIFETIME = "price_1TO7M8Dyr8pwlym5fP1iqkvr"
 
 # ─── Paddle environment (fallback provider) ────────────────────────────────
 # Only matters when the landing page's CHECKOUT_PROVIDER is flipped back
@@ -79,14 +87,32 @@ PADDLE_PRICE_LIFETIME = "pri_01kpmpjawbnj8yxmm32qmmc2dz"
 # Where users land after closing the Customer Portal.
 PORTAL_RETURN_URL    = "https://trysmartcut.com/thanks"
 
+# Public-facing base URL of *this* worker — baked into outgoing emails
+# (download buttons, billing links). Update when you wire up a custom
+# domain like https://license.trysmartcut.com. Fallback to workers.dev
+# until then.
+PUBLIC_API_URL       = "https://smartcut-license.patient-dust-4377.workers.dev"
+
+# Stripe Customer Portal login URL. Create one at:
+#   Stripe Dashboard → Settings → Billing → Customer portal → Activate
+# then copy the "login link" (looks like https://billing.stripe.com/p/login/…).
+# Subscribers get this in their license email so they can cancel or update
+# their card without opening a support ticket. Leave blank to fall back to
+# the mailto support link.
+#
+# GO LIVE: When wrangler secret STRIPE_API_KEY is sk_live_…, this must be the
+# live portal login link (no "test_" in the path). Test links only work for
+# Stripe test-mode customers.
+STRIPE_PORTAL_URL    = "https://billing.stripe.com/p/login/8x200jf06gl6du7dgtabK00"
+
 # From address for license-key emails via Resend.
 MAIL_FROM            = "SmartCut <license@trysmartcut.com>"
 
 # Current distributable version. Bump on release, re-upload the .zxp to R2
 # before setting. Client's `GET /latest-version` reads this.
-LATEST_VERSION       = "1.0.0"
-LATEST_NOTES         = "Initial public release."
-LATEST_RELEASED_AT   = "2026-04-18T00:00:00Z"
+LATEST_VERSION       = "1.0.1"
+LATEST_NOTES         = "Seamless in-panel updates via SmartCut Updater. Activation screen polish."
+LATEST_RELEASED_AT   = "2026-04-20T00:00:00Z"
 
 # ─── Lifetime launch-window caps ───────────────────────────────────────────
 # The lifetime deal ends when EITHER of these two triggers first.

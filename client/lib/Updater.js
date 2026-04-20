@@ -145,6 +145,58 @@
       try { global.open(url, "_blank"); } catch (e2) {}
     },
 
+    // Alias used by main.js (pricing, Paddle portal, checkout deep-links).
+    openReleasePage: function (url) {
+      if (!url) return;
+      Updater.openURL(url);
+    },
+
+    // Resolve the first existing path to the SmartCut Updater helper app.
+    // We install it to /Applications during first-run (see build-mac-dmg.sh),
+    // but fall back to ~/Applications and the DMG mount location for dev.
+    findHelperApp: function () {
+      try {
+        var fs   = require("fs");
+        var path = require("path");
+        var os   = require("os");
+        var candidates = [
+          "/Applications/SmartCut Updater.app",
+          path.join(os.homedir(), "Applications/SmartCut Updater.app")
+        ];
+        for (var i = 0; i < candidates.length; i++) {
+          if (fs.existsSync(candidates[i] + "/Contents/MacOS/smartcut-updater")) {
+            return candidates[i];
+          }
+        }
+      } catch (e) {}
+      return null;
+    },
+
+    // Launches the helper app with the user's license key + machineId so it
+    // can talk to the license worker without the panel being open. Returns
+    // { ok: true } if we could fire off `open`, otherwise { ok: false }.
+    runHelperApp: function (opts) {
+      opts = opts || {};
+      var appPath = Updater.findHelperApp();
+      if (!appPath) return { ok: false, reason: "not_installed",
+        message: "SmartCut Updater.app is not installed. Reinstall from trysmartcut.com to enable one-click updates." };
+      try {
+        var cp = require("child_process");
+        var args = ["-a", appPath, "-n", "--args"];
+        if (opts.licenseKey) args.push("--licenseKey", opts.licenseKey);
+        if (opts.machineId)  args.push("--machineId",  opts.machineId);
+        if (opts.backend)    args.push("--backend",    opts.backend);
+        if (opts.auto)       args.push("--auto");
+        if (opts.force)      args.push("--force");
+        args.push("--checkAndInstall");
+        cp.spawn("/usr/bin/open", args, { detached: true, stdio: "ignore" }).unref();
+        return { ok: true, path: appPath };
+      } catch (e) {
+        return { ok: false, reason: "spawn_failed",
+          message: "Could not launch the updater: " + (e.message || e) };
+      }
+    },
+
     currentVersion: getCurrentVersion
   };
 
