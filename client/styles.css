@@ -1193,6 +1193,11 @@ input[type="range"]::-webkit-slider-thumb:hover { background: var(--cyan-hover);
   color: var(--text-primary);
 }
 .update-actions { display: flex; align-items: center; gap: 4px; }
+.update-notes-snippet {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+.about-check-updates { padding: 0; font-size: inherit; }
 
 /* ─── About modal ────────────────────────────────────────────────────────── */
 .about-overlay {

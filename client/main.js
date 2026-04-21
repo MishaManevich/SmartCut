@@ -142,6 +142,8 @@ document.addEventListener("DOMContentLoaded", function () {
   window.addEventListener("focus", function () {
     var main = document.getElementById("mainPanel");
     if (main && main.style.display !== "none") refreshScope();
+    // Cheap when throttled (Updater checks /latest-version at most every 6h).
+    checkForUpdates();
   });
 });
 
@@ -385,6 +387,7 @@ function showAboutPanel() {
   var kind = info.kind || "none";
   var summary = "";
   var rows    = [["Version", ver]];
+  rows.push(["Updates", ""]);
 
   if (kind === "full") {
     rows.push(["License",     "Active"]);
@@ -424,10 +427,14 @@ function showAboutPanel() {
   }
   html += '<dl class="about-dl">';
   rows.forEach(function (row) {
-    var val = escapeHtml(String(row[1]));
-    if (row[0] === "Machine ID") {
-      val = '<span class="about-machine-id">' + val + '</span>' +
+    var val;
+    if (row[0] === "Updates") {
+      val = '<button type="button" class="btn-link about-check-updates" onclick="checkForUpdatesManual()">Check for updates</button>';
+    } else if (row[0] === "Machine ID") {
+      val = '<span class="about-machine-id">' + escapeHtml(String(row[1])) + '</span>' +
             '<button class="btn-link about-copy-btn" onclick="copyMachineIdToClipboard()">Copy</button>';
+    } else {
+      val = escapeHtml(String(row[1]));
     }
     html += '<dt>' + escapeHtml(row[0]) + '</dt><dd>' + val + '</dd>';
   });
@@ -474,16 +481,49 @@ function hideAboutPanel() {
 }
 
 // ─── Update check ──────────────────────────────────────────────────────────
+// Shows the top banner when the license worker reports a newer semver than
+// manifest.xml. GET /latest-version is public; the actual installer URL stays
+// license-gated (openUpdatePage → Updater.app or signed /download-url).
+function renderUpdateBanner(res) {
+  if (!res || !res.updateAvailable) return;
+  var banner = document.getElementById("updateBanner");
+  var txt    = document.getElementById("updateBannerText");
+  if (!banner || !txt) return;
+  var line = "Update available: <strong>v" + escapeHtml(String(res.latest)) + "</strong> " +
+             "(you have v" + escapeHtml(String(res.current)) + ")";
+  if (res.notes) {
+    var n = String(res.notes).replace(/[<>]/g, "").trim();
+    if (n.length > 140) n = n.slice(0, 137) + "\u2026";
+    line += ' <span class="update-notes-snippet">\u00b7 ' + escapeHtml(n) + "</span>";
+  }
+  txt.innerHTML = line;
+  banner.style.display = "flex";
+  banner.title = res.notes ? String(res.notes).replace(/[<>]/g, "") : "";
+}
+
 function checkForUpdates() {
   if (!window.Updater) return;
   Updater.check(false).then(function (res) {
+    if (res.updateAvailable) renderUpdateBanner(res);
+  });
+}
+
+// About dialog — forces a fresh request so users don’t wait up to 6h.
+function checkForUpdatesManual() {
+  if (!window.Updater) return;
+  try { status("Checking for updates\u2026"); } catch (e) {}
+  Updater.check(true).then(function (res) {
     if (res.updateAvailable) {
-      var banner = document.getElementById("updateBanner");
-      var txt    = document.getElementById("updateBannerText");
-      if (banner && txt) {
-        txt.innerHTML = "Update available: <strong>v" + res.latest + "</strong> (you have v" + res.current + ")";
-        banner.style.display = "flex";
-      }
+      renderUpdateBanner(res);
+      try {
+        status("Update v" + res.latest + " available \u00b7 use Download on the banner or below.");
+      } catch (e2) {}
+      return;
+    }
+    if (res.error) {
+      try { status("Couldn\u2019t reach the update server. Check your connection and try again."); } catch (e3) {}
+    } else {
+      try { status("You\u2019re on the latest SmartCut (v" + res.current + ")."); } catch (e4) {}
     }
   });
 }

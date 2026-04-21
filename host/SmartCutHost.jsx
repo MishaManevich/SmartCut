@@ -723,6 +723,26 @@ function trackCoverageWithin(track, s, e) {
   return total;
 }
 
+// v9.19: For a selected clip on Vn, An usually carries its sound (even when
+// Premiere's formal "link" is missing). pickAudioAuto() must NOT run before this
+// check — otherwise A1's long bed often wins coverage over a short A2 clip
+// under the same time span.
+function pickAudioSameIndexAsSelectedVideo(seq, videoTrackIndex, s, e) {
+  if (videoTrackIndex < 0 || !seq.audioTracks ||
+      videoTrackIndex >= seq.audioTracks.numTracks) {
+    return null;
+  }
+  var span = Math.max(0.01, e - s);
+  var cov = trackCoverageWithin(seq.audioTracks[videoTrackIndex], s, e);
+  if (cov < span * 0.35) return null;
+  return {
+    kind:  "audio",
+    index: videoTrackIndex,
+    reason: "A" + (videoTrackIndex + 1) + " paired with selected V" + (videoTrackIndex + 1) +
+            " (" + cov.toFixed(1) + "s overlap, same-index)"
+  };
+}
+
 // Iterate all clips on a given track and return those overlapping [s,e].
 function collectClipsOnTrack(track, kind, trackIndex, s, e) {
   var out = [];
@@ -829,10 +849,12 @@ function resolveAnalysisPlan(payloadJSON) {
       return jsonStringify({ ok: false, error: "Scope is too short (< 100ms)." });
     }
 
-    // ── 2. Audio source ──────────────────────────────────────────────────
-    // Strategy: within the chosen bounds, pick the track with the highest
-    // clip coverage. Prefer dedicated audio tracks over embedded video audio
-    // (better signal-to-noise for pro recordings). Fall back to V1 embedded.
+    // ── 2. Audio source (+ cut targets) ─────────────────────────────────
+    // v9.19: Resolve target tracks BEFORE pickAudioAuto(). The old order chose
+    // "max coverage audio in [start,end]", so A1's continuous bed under V1
+    // often tied or beat A2 for a short V2 overlay, breaking cuts V2+A1.
+    var targetTracks = resolveTargetTracksFromSelection(seq);
+
     var audioKind       = "video";   // "video" (embedded on video track) or "audio"
     var audioTrackIndex = 0;
     var audioReason     = "";
@@ -861,7 +883,40 @@ function resolveAnalysisPlan(payloadJSON) {
     }
 
     if (audioMode === "auto" || audioMode === "") {
-      var picked = pickAudioAuto();
+      var picked = null;
+      if (videoSel.length === 1) {
+        var vTrackIdx = videoSel[0].trackIndex;
+        // (a) Premiere-reported links that pass overlap rules — use that audio.
+        if (targetTracks && targetTracks.audio && targetTracks.audio.length > 0) {
+          var tList = targetTracks.audio;
+          var chosenA = tList[0];
+          for (var lix = 0; lix < tList.length; lix++) {
+            if (tList[lix] === vTrackIdx) {
+              chosenA = vTrackIdx;
+              break;
+            }
+          }
+          picked = {
+            kind:   "audio",
+            index:  chosenA,
+            reason: "linked target A" + (chosenA + 1) + " (matches selection)"
+          };
+        } else {
+          // (b) Same Vn/An stack when unlinked — do NOT lose to A1 via coverage.
+          picked = pickAudioSameIndexAsSelectedVideo(seq, vTrackIdx, startSec, endSec);
+          if (picked &&
+              targetTracks &&
+              (!targetTracks.audio || targetTracks.audio.length === 0)) {
+            targetTracks.audio = [vTrackIdx];
+            if (targetTracks.trace) {
+              targetTracks.trace += " | v9.19 same-index audio targets A" + (vTrackIdx + 1);
+            }
+          }
+        }
+      }
+      if (!picked) {
+        picked = pickAudioAuto();
+      }
       audioKind = picked.kind; audioTrackIndex = picked.index; audioReason = picked.reason;
     } else if (audioMode.charAt(0) === "v") {
       audioKind = "video";
@@ -904,11 +959,6 @@ function resolveAnalysisPlan(payloadJSON) {
     clips.sort(function (a, b) { return a.seqStartSec - b.seqStartSec; });
 
     var trackLabel = (audioKind === "audio" ? "A" : "V") + (audioTrackIndex + 1);
-
-    // v9.9: figure out which tracks the cut phase should actually touch.
-    // Derived from the current selection + each selected clip's linked
-    // items.
-    var targetTracks = resolveTargetTracksFromSelection(seq);
 
     // v9.16: if the resolver couldn't find any LINKED audio (Premiere
     // reported zero linked items, or the linked clips had < 50% overlap),
@@ -993,7 +1043,7 @@ function resolveAnalysisPlan(payloadJSON) {
 
 function applyCuts(payloadJSON) {
   logInit();
-  log("applyCuts() v9.16 - auto-detected audio fallback when no link present");
+  log("applyCuts() v9.19 - selection-paired audio before coverage auto-pick");
   log("Premiere version: " + (app.version || "unknown"));
 
   try {
