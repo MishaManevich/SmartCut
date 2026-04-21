@@ -488,17 +488,27 @@ function renderUpdateBanner(res) {
   if (!res || !res.updateAvailable) return;
   var banner = document.getElementById("updateBanner");
   var txt    = document.getElementById("updateBannerText");
+  var subEl  = document.getElementById("updateBannerSub");
   if (!banner || !txt) return;
-  var line = "Update available: <strong>v" + escapeHtml(String(res.latest)) + "</strong> " +
-             "(you have v" + escapeHtml(String(res.current)) + ")";
+  var line = "New version <strong>v" + escapeHtml(String(res.latest)) + "</strong> " +
+             "is ready &nbsp;\u00b7&nbsp; you have <strong>v" + escapeHtml(String(res.current)) + "</strong>";
   if (res.notes) {
     var n = String(res.notes).replace(/[<>]/g, "").trim();
     if (n.length > 140) n = n.slice(0, 137) + "\u2026";
-    line += ' <span class="update-notes-snippet">\u00b7 ' + escapeHtml(n) + "</span>";
+    line += '<br><span class="update-notes-snippet">' + escapeHtml(n) + "</span>";
   }
   txt.innerHTML = line;
   banner.style.display = "flex";
   banner.title = res.notes ? String(res.notes).replace(/[<>]/g, "") : "";
+
+  if (subEl) {
+    var hasHelper = window.Updater && typeof Updater.findHelperApp === "function" &&
+      Updater.findHelperApp();
+    subEl.style.display = "block";
+    subEl.textContent = hasHelper
+      ? "Installs in place\u2014same model other Premiere extensions use: Updater replaces the panel folder outside Premiere. When it finishes, quit Premiere completely (\u2318Q), then reopen. You do not need to buy or download the full installer again."
+      : "SmartCut Updater wasn\u2019t found on this Mac. Click Install update to download in your browser, or copy \u201cSmartCut Updater.app\u201d from your SmartCut DMG into Applications for one-click updates next time.";
+  }
 }
 
 function checkForUpdates() {
@@ -516,7 +526,7 @@ function checkForUpdatesManual() {
     if (res.updateAvailable) {
       renderUpdateBanner(res);
       try {
-        status("Update v" + res.latest + " available \u00b7 use Download on the banner or below.");
+        status("Update v" + res.latest + " ready \u00b7 tap Install update on the banner.");
       } catch (e2) {}
       return;
     }
@@ -532,11 +542,10 @@ function dismissUpdateBanner() {
   if (b) b.style.display = "none";
 }
 
-// Primary path: hand off to the SmartCut Updater.app so the update can run
-// outside Premiere Pro (downloads the payload, replaces the extension
-// folder, and prompts the user to restart). Falls back to the signed-URL
-// browser download when the helper isn't installed (dev / very old
-// customers) or when the user has no full license.
+// In-place updates (competitors do the same for Adobe CEP): the panel cannot
+// swap files inside Premiere's sandbox, so we launch SmartCut Updater.app
+// (from the DMG) to download the signed zip and rsync into the CEP folder—no
+// “uninstall and buy again” flow. Git-based dev installs still use install-dev.sh.
 function openUpdatePage() {
   if (!window.Updater) return;
   var info = (window.License && License.info) ? License.info() : {};
@@ -549,19 +558,17 @@ function openUpdatePage() {
       backend:    (window.License && License.BACKEND_BASE) || null
     });
     if (res && res.ok) {
-      status("Opening SmartCut Updater\u2026");
+      status("SmartCut Updater opened. Approve the dialog\u2014it installs over your current panel. Then quit Premiere (\u2318Q) and reopen.");
       dismissUpdateBanner();
       return;
     }
-    // Helper not present — fall back to the legacy browser download. Note
-    // this still hits the signed /download-url endpoint, so the gate holds.
     derr && derr("[SmartCut] Updater.app not found, falling back to browser DL: " + (res && res.reason));
   }
 
-  status("Requesting download link\u2026");
+  status("Getting a secure download link\u2026");
   Updater.downloadLatest().then(function (res) {
     if (res.ok) {
-      status("Download started in your browser \u00b7 " + (res.version || ""));
+      status("Download started in your browser. Open the zip and merge into your CEP extensions folder, or install SmartCut Updater from your DMG for one-click updates later.");
       return;
     }
     status(res.message || "Could not fetch update link");

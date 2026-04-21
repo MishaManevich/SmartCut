@@ -47,13 +47,16 @@
       </div>
     </div>
 
-    <!-- Update banner -->
-    <div id="updateBanner" class="update-banner" style="display:none;">
-      <span id="updateBannerText"></span>
-      <span class="update-actions">
-        <button class="btn-link" onclick="openUpdatePage()">Download</button>
-        <button class="btn-icon" onclick="dismissUpdateBanner()" title="Dismiss">&#x2715;</button>
-      </span>
+    <!-- Update banner: in-place update via SmartCut Updater.app (DMG) or browser .zip — not a full "reinstall" from scratch. -->
+    <div id="updateBanner" class="update-banner" style="display:none;" role="status" aria-live="polite">
+      <div class="update-banner-copy">
+        <div id="updateBannerText" class="update-banner-line"></div>
+        <div id="updateBannerSub" class="update-banner-sub" style="display:none;"></div>
+      </div>
+      <div class="update-actions">
+        <button type="button" class="btn-primary update-banner-cta" id="updateBannerBtn" onclick="openUpdatePage()">Install update</button>
+        <button type="button" class="btn-link" onclick="dismissUpdateBanner()" title="Remind me later">Later</button>
+      </div>
     </div>
 
     <!-- About dialog (modal overlay) -->

@@ -1,6 +1,11 @@
 /**
  * SmartCut — Update checker (license-gated)
  *
+ * Customer updates are in-place: the panel launches SmartCut Updater.app (ships
+ * inside the DMG), which downloads a signed zip and installs into Adobe's CEP
+ * extensions folder—users are not asked to "rebuy" or run the full DMG each time.
+ * Developers testing unreleased Git commits still use install-dev.sh / rsync.
+ *
  * ─── Security model ──────────────────────────────────────────────────────────
  * Unpaid users must NOT be able to download new .zxp installers. Two things
  * make that work:
