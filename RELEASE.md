@@ -47,6 +47,27 @@ Your **development** flow (`install-dev.sh` + **Window → Extensions → SmartC
 
 8. **macOS-only launch:** `license-worker/wrangler.toml` sets `SHIPPING_MACOS_ONLY = "1"`. The worker blocks Windows downloads, and the marketing site copy matches. Set to `"0"` when a Windows `.zxp` is in R2.
 
+## Commercial launch (money + “what users see”)
+
+Do **not** skip this before scaling paid traffic. Technical packaging above ≠ live payments.
+
+1. **Stripe Live (required for real revenue)** — Work through **`smartcut-landing/GO-LIVE-STRIPE.md`** in order: live `sk_live_…`, live price IDs, live webhook `whsec_…`, live Payment Links, live Customer Portal URL, production landing build with `VITE_STRIPE_*` and `VITE_STRIPE_MODE=live`. Mismatch = paid orders without licenses or wrong plans.
+
+2. **`__release__` in KV** — If you ever set the `LICENSES` KV key **`__release__`**, it **overrides** `LATEST_VERSION` / `LATEST_NOTES` in `wrangler.toml` for `/latest-version` and `get-install`. After each ship, update **both** `wrangler.toml` **and** KV (or use your **`POST /admin/release`** with `ADMIN_TOKEN`) so buyers and the panel see the new version the same day:
+
+   ```bash
+   cd tools/license-worker
+   npx wrangler kv key put __release__ \
+     '{"version":"1.0.2","notes":"…buyer-facing one-liner…","releasedAt":"2026-04-21T12:00:00Z"}' \
+     --binding=LICENSES --remote
+   ```
+
+3. **`LATEST_NOTES`** — Must read like a **product changelog** for customers (panel banner + email), not internal dev notes.
+
+4. **Notarized DMG** — For strangers’ Macs (Gatekeeper), use **Developer ID + notarization** per step 6 above; dev `install-dev.sh` is not the buyer path.
+
+5. **Support** — `support@trysmartcut.com` is already referenced on the site; keep the inbox monitored for launch week.
+
 **Build notes**
 
 - **Apple Silicon:** ZXPSignCmd is Intel-only; install Rosetta once (`softwareupdate --install-rosetta --agree-to-license`), then `make-cert.sh` / `build-zxp.sh` use `arch -x86_64` automatically.

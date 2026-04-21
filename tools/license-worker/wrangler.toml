@@ -71,6 +71,8 @@ STRIPE_PRICE_ANNUAL   = "price_1TO7LUDyr8pwlym5j5yvmWQe"
 STRIPE_PRICE_LIFETIME = "price_1TO7M8Dyr8pwlym5fP1iqkvr"
 
 # ─── Paddle environment (fallback provider) ────────────────────────────────
+# trysmartcut.com checkout is Stripe-first; this only applies if you flip the
+# landing build back to Paddle. Safe to leave sandbox until Paddle prod is wired.
 # Only matters when the landing page's CHECKOUT_PROVIDER is flipped back
 # to paddle. Otherwise ignored.
 # "sandbox"    → worker talks to https://sandbox-api.paddle.com
@@ -111,7 +113,8 @@ MAIL_FROM            = "SmartCut <license@trysmartcut.com>"
 # Current distributable version. Bump on release, re-upload the .zxp to R2
 # before setting. Client's `GET /latest-version` reads this.
 LATEST_VERSION       = "1.0.2"
-LATEST_NOTES         = "Test update: track pairing v9.20 + clearer in-panel updater copy. Quit Premiere after install."
+# Shown in /latest-version, in-panel update banner, and license emails — write for buyers, not devs.
+LATEST_NOTES         = "Smarter track pairing for stacked timelines (V2/A2, etc.), clearer in-app updates, and account screen fixes. After updating, quit Premiere fully (⌘Q) and reopen."
 LATEST_RELEASED_AT   = "2026-04-21T12:00:00Z"
 
 # ─── Lifetime launch-window caps ───────────────────────────────────────────

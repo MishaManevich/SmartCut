@@ -39,7 +39,7 @@
 (function (global) {
   "use strict";
 
-  var CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000; // re-check every 6h
+  var CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000; // re-check every 6h (About → Check for updates bypasses)
   var LAST_CHECK_KEY    = "SMARTCUT_LAST_UPDATE_CHECK";
   var LAST_KNOWN_KEY    = "SMARTCUT_LAST_KNOWN_VERSION";
 
