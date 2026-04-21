@@ -1830,10 +1830,7 @@ async function sendLicenseEmail(env, to, licenseKey, plan, opts = {}) {
             Download for macOS
           </a>
       </td></tr>
-    </table>
-    <p class="sc-small" style="margin:8px 0 0;color:#71717a;font-size:12px;line-height:1.5;text-align:center;">
-      You&apos;ll get a <b>.dmg</b> with <b>Install SmartCut</b> inside &mdash; no extra tools. Requires macOS with Premiere Pro 24+. <b>Windows</b> is coming soon &mdash; your license will work there too.
-    </p>` : `
+    </table>` : `
     <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin:20px 0 4px;">
       <tr>
         <td width="50%" style="padding-right:6px;">
