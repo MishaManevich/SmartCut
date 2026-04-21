@@ -1,6 +1,6 @@
 {
   "name": "smartcut-pro",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Build/dev tooling for SmartCut CEP extension. The extension itself is loaded directly from source by Premiere; this file only exists for bundling transformers.js and ORT WASM assets.",
   "scripts": {
@@ -9,7 +9,8 @@
     "make-cert":      "./tools/make-cert.sh",
     "build:zxp":      "./tools/build-zxp.sh",
     "build:mac-dmg":  "./tools/build-mac-dmg.sh",
-    "release":        "npm run build:zxp && npm run build:mac-dmg"
+    "build:release-zip": "./tools/build-release-zip.sh",
+    "release":        "npm run build:zxp && npm run build:release-zip && npm run build:mac-dmg"
   },
   "devDependencies": {
     "@huggingface/transformers": "^3.0.2",
