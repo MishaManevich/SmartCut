@@ -463,7 +463,26 @@ function showAboutPanel() {
     actions.innerHTML = buttons;
   }
 
+  var fb = document.getElementById("aboutUpdateFeedback");
+  if (fb) {
+    fb.textContent = "";
+    fb.style.display = "none";
+    fb.className = "about-update-feedback";
+  }
+
   document.getElementById("aboutPanel").style.display = "flex";
+}
+
+function setAboutUpdateFeedback(msg, isErr) {
+  var el = document.getElementById("aboutUpdateFeedback");
+  if (!el) {
+    try { status(msg); } catch (e) {}
+    return;
+  }
+  el.textContent = msg || "";
+  el.style.display = msg ? "block" : "none";
+  el.className = "about-update-feedback" + (isErr ? " about-update-feedback-err" : "");
+  try { status(msg); } catch (e2) {}
 }
 
 // Called from About dialog when user clicks "Enter License Key". Hides the
@@ -519,22 +538,33 @@ function checkForUpdates() {
 }
 
 // About dialog — forces a fresh request so users don’t wait up to 6h.
+// Feedback must appear inside the modal: status() only updates the footer, which
+// is covered by the About overlay (looked like "nothing happens").
 function checkForUpdatesManual() {
   if (!window.Updater) return;
-  try { status("Checking for updates\u2026"); } catch (e) {}
+  setAboutUpdateFeedback("Checking for updates\u2026", false);
   Updater.check(true).then(function (res) {
     if (res.updateAvailable) {
       renderUpdateBanner(res);
-      try {
-        status("Update v" + res.latest + " ready \u00b7 tap Install update on the banner.");
-      } catch (e2) {}
+      setAboutUpdateFeedback(
+        "Update v" + res.latest + " is available. Close this window to see the green banner at the top, then tap Install update.",
+        false
+      );
       return;
     }
     if (res.error) {
-      try { status("Couldn\u2019t reach the update server. Check your connection and try again."); } catch (e3) {}
+      setAboutUpdateFeedback(
+        "Couldn\u2019t reach the update server: " + res.error + ". Check your connection and try again.",
+        true
+      );
     } else {
-      try { status("You\u2019re on the latest SmartCut (v" + res.current + ")."); } catch (e4) {}
+      setAboutUpdateFeedback(
+        "You\u2019re on the latest SmartCut (v" + res.current + ").",
+        false
+      );
     }
+  }).catch(function (err) {
+    setAboutUpdateFeedback("Update check failed: " + (err && err.message ? err.message : String(err)), true);
   });
 }
 function dismissUpdateBanner() {
