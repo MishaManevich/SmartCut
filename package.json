@@ -1,6 +1,6 @@
 {
   "name": "smartcut-pro",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "description": "Build/dev tooling for SmartCut CEP extension. The extension itself is loaded directly from source by Premiere; this file only exists for bundling transformers.js and ORT WASM assets.",
   "scripts": {

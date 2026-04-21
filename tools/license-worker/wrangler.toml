@@ -110,9 +110,9 @@ MAIL_FROM            = "SmartCut <license@trysmartcut.com>"
 
 # Current distributable version. Bump on release, re-upload the .zxp to R2
 # before setting. Client's `GET /latest-version` reads this.
-LATEST_VERSION       = "1.0.1"
-LATEST_NOTES         = "Seamless in-panel updates via SmartCut Updater. Activation screen polish."
-LATEST_RELEASED_AT   = "2026-04-20T00:00:00Z"
+LATEST_VERSION       = "1.0.2"
+LATEST_NOTES         = "Test update: track pairing v9.20 + clearer in-panel updater copy. Quit Premiere after install."
+LATEST_RELEASED_AT   = "2026-04-21T12:00:00Z"
 
 # ─── Lifetime launch-window caps ───────────────────────────────────────────
 # The lifetime deal ends when EITHER of these two triggers first.
