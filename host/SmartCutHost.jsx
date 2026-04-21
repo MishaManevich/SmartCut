@@ -723,26 +723,6 @@ function trackCoverageWithin(track, s, e) {
   return total;
 }
 
-// v9.19: For a selected clip on Vn, An usually carries its sound (even when
-// Premiere's formal "link" is missing). pickAudioAuto() must NOT run before this
-// check — otherwise A1's long bed often wins coverage over a short A2 clip
-// under the same time span.
-function pickAudioSameIndexAsSelectedVideo(seq, videoTrackIndex, s, e) {
-  if (videoTrackIndex < 0 || !seq.audioTracks ||
-      videoTrackIndex >= seq.audioTracks.numTracks) {
-    return null;
-  }
-  var span = Math.max(0.01, e - s);
-  var cov = trackCoverageWithin(seq.audioTracks[videoTrackIndex], s, e);
-  if (cov < span * 0.35) return null;
-  return {
-    kind:  "audio",
-    index: videoTrackIndex,
-    reason: "A" + (videoTrackIndex + 1) + " paired with selected V" + (videoTrackIndex + 1) +
-            " (" + cov.toFixed(1) + "s overlap, same-index)"
-  };
-}
-
 // Iterate all clips on a given track and return those overlapping [s,e].
 function collectClipsOnTrack(track, kind, trackIndex, s, e) {
   var out = [];
@@ -769,6 +749,27 @@ function collectClipsOnTrack(track, kind, trackIndex, s, e) {
     } catch (eX) {}
   }
   return out;
+}
+
+// v9.20: When the user selects a clip on Vn, prefer An if it has real media
+// overlapping the clip — BEFORE trusting clip.getLinkedItems(). Premiere often
+// keeps stale links from A1's bed to higher video tracks (V2/V3 overlays), which
+// made us analyze/cut A1 instead of A2/A3 despite the user's stack layout.
+function pickSameIndexAudioForSelectedVideo(seq, videoTrackIndex, startSec, endSec) {
+  if (videoTrackIndex < 0 || !seq.audioTracks ||
+      videoTrackIndex >= seq.audioTracks.numTracks) {
+    return null;
+  }
+  var track = seq.audioTracks[videoTrackIndex];
+  var clips = collectClipsOnTrack(track, "audio", videoTrackIndex, startSec, endSec);
+  if (!clips || clips.length === 0) return null;
+  var cov = trackCoverageWithin(track, startSec, endSec);
+  return {
+    kind: "audio",
+    index: videoTrackIndex,
+    reason: "A" + (videoTrackIndex + 1) + " same stack as selected V" + (videoTrackIndex + 1) +
+            " (" + clips.length + " clip(s), " + cov.toFixed(2) + "s)"
+  };
 }
 
 function resolveAnalysisPlan(payloadJSON) {
@@ -850,9 +851,8 @@ function resolveAnalysisPlan(payloadJSON) {
     }
 
     // ── 2. Audio source (+ cut targets) ─────────────────────────────────
-    // v9.19: Resolve target tracks BEFORE pickAudioAuto(). The old order chose
-    // "max coverage audio in [start,end]", so A1's continuous bed under V1
-    // often tied or beat A2 for a short V2 overlay, breaking cuts V2+A1.
+    // v9.19–v9.20: Resolve selection first; pick same-stack An before linked
+    // metadata or global coverage (see pickSameIndexAudioForSelectedVideo).
     var targetTracks = resolveTargetTracksFromSelection(seq);
 
     var audioKind       = "video";   // "video" (embedded on video track) or "audio"
@@ -886,8 +886,17 @@ function resolveAnalysisPlan(payloadJSON) {
       var picked = null;
       if (videoSel.length === 1) {
         var vTrackIdx = videoSel[0].trackIndex;
-        // (a) Premiere-reported links that pass overlap rules — use that audio.
-        if (targetTracks && targetTracks.audio && targetTracks.audio.length > 0) {
+        // (a) Same-stack Vn/An whenever An has analyzable media in-range. Beats
+        // Premiere links — linkedItems often still points V2→A1 from an old bed.
+        picked = pickSameIndexAudioForSelectedVideo(seq, vTrackIdx, startSec, endSec);
+        if (picked && targetTracks) {
+          targetTracks.audio = [vTrackIdx];
+          if (targetTracks.trace) {
+            targetTracks.trace += " | v9.20 same-stack audio A" + (vTrackIdx + 1) + " (preferred over links)";
+          }
+        }
+        // (b) No audio on An — fall back to qualified linked tracks only.
+        if (!picked && targetTracks && targetTracks.audio && targetTracks.audio.length > 0) {
           var tList = targetTracks.audio;
           var chosenA = tList[0];
           for (var lix = 0; lix < tList.length; lix++) {
@@ -899,19 +908,8 @@ function resolveAnalysisPlan(payloadJSON) {
           picked = {
             kind:   "audio",
             index:  chosenA,
-            reason: "linked target A" + (chosenA + 1) + " (matches selection)"
+            reason: "linked target A" + (chosenA + 1) + " (no same-stack audio on A" + (vTrackIdx + 1) + ")"
           };
-        } else {
-          // (b) Same Vn/An stack when unlinked — do NOT lose to A1 via coverage.
-          picked = pickAudioSameIndexAsSelectedVideo(seq, vTrackIdx, startSec, endSec);
-          if (picked &&
-              targetTracks &&
-              (!targetTracks.audio || targetTracks.audio.length === 0)) {
-            targetTracks.audio = [vTrackIdx];
-            if (targetTracks.trace) {
-              targetTracks.trace += " | v9.19 same-index audio targets A" + (vTrackIdx + 1);
-            }
-          }
         }
       }
       if (!picked) {
@@ -1043,7 +1041,7 @@ function resolveAnalysisPlan(payloadJSON) {
 
 function applyCuts(payloadJSON) {
   logInit();
-  log("applyCuts() v9.19 - selection-paired audio before coverage auto-pick");
+  log("applyCuts() v9.20 - same-stack Vn/An before Premiere link graph");
   log("Premiere version: " + (app.version || "unknown"));
 
   try {
