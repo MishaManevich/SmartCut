@@ -69,6 +69,10 @@ class SVG:
         self.parts.append(f'<polygon points="{p}" fill="{fill}" stroke="{stroke}" '
                           f'stroke-width="{width}"/>')
 
+    def circle(self, cx, cy, r, stroke="#1a1a1a", width=1.0, fill="none"):
+        self.parts.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{r:.1f}" '
+                          f'fill="{fill}" stroke="{stroke}" stroke-width="{width}"/>')
+
     def text(self, x, y, s, size=13, anchor="middle", weight="normal",
              fill="#111"):
         self.parts.append(f'<text x="{x:.1f}" y="{y:.1f}" '
@@ -245,9 +249,14 @@ def draw_deck(svg, ox, oy, depth):
 
 
 # ---- FRONT elevation (aligned under the plan) ------------------------------
-# hardware positions measured off the original drawing (inches from wall top)
-HINGE_Y = (19, 77)        # red cam-lock / hinge on the door's left jamb
-HANDLE_Y = 48             # red door handle / latch, mid-height on the right side
+# door hardware, as inch bounding boxes measured off the original 8x8 drawing
+# (x from wall left, y down from wall top).  RED = on the door.
+HW_RED = [
+    (46.0, 7.5, 48.0, 13.7),     # top cam-lock (vertical) near the latch side
+    (17.3, 16.5, 28.1, 23.2),    # upper hinge on the left jamb
+    (43.1, 45.7, 55.8, 49.3),    # handle / latch, mid-height (crosses right jamb)
+    (17.3, 74.1, 28.1, 81.3),    # lower hinge on the left jamb
+]
 WALL_LOCK_Y = (19, 67)    # blue cam-locks on the outer left & right wall edges
 
 
@@ -272,19 +281,18 @@ def draw_elevation(svg, ox, oy, op0, op1):
 
     # door leaf: same x as the plan opening, centered in the 82" body, 76" tall
     dx0, dx1 = ox + op0 * s, ox + op1 * s
-    dtop = yabs(EL_TOP + (EL_BODY - DOOR_H) / 2)
-    dbot = dtop + DOOR_H * s
+    dtop, dbot = yabs(7), yabs(83)
     svg.rect(dx0, dtop, dx1 - dx0, DOOR_H * s, width=1.2)
     svg.line((dx0 + dx1) / 2, dtop, (dx0 + dx1) / 2, dbot, width=0.4,
-             stroke="#aaa")                                        # leaf reveal
+             stroke="#bbb")                                        # leaf reveal
 
-    # ---- door hardware (red): two hinges on the left jamb + handle on the right
-    for hy in HINGE_Y:
-        svg.rect(dx0 - 4, yabs(hy) - 5, 8, 10, stroke="#cc2222", width=1.0,
-                 fill="#cc2222")
-    hy = yabs(HANDLE_Y)
-    svg.rect(dx1 - 13, hy - 3, 11, 6, stroke="#cc2222", width=1.0, fill="#cc2222")
-    svg.line(dx1 - 13, hy, dx1 - 22, hy, stroke="#cc2222", width=1.6)
+    # ---- door hardware (red): top cam-lock, two left-jamb hinges, latch handle
+    for xi0, yi0, xi1, yi1 in HW_RED:
+        svg.rect(ox + xi0 * s, yabs(yi0), (xi1 - xi0) * s, (yi1 - yi0) * s,
+                 stroke="#cc2222", width=1.1, fill="#f4d0d0")
+    # knob at the outer end of the handle
+    svg.circle(ox + 55.8 * s, yabs(47.5), 2.4 * s * 0.5, stroke="#cc2222",
+               width=1.1, fill="#f4d0d0")
 
     # ---- wall cam-locks (blue) on the outer left & right edges
     for cy in WALL_LOCK_Y:
@@ -298,10 +306,10 @@ def draw_elevation(svg, ox, oy, op0, op1):
         svg.line(ox + Wp + 4, yabs(cy), lx, ly, stroke="#2b5fb3", width=0.7)
     svg.text(lx + 4, ly + 4, "CAM-LOCK", size=11, anchor="start", fill="#2b5fb3")
 
-    # dimensions
+    # dimensions: 96" on top; 34" and 76" INSIDE the door like the original
     dim_h(svg, ox, ox + Wp, oy - 14, f'{WIDTH}"', size=12)
-    dim_h(svg, dx0, dx1, dtop - 12, f'{DOOR_W}"')
-    dim_v(svg, dtop, dbot, dx0 - 12, f'{DOOR_H}"', side="left")
+    dim_h(svg, dx0, dx1, yabs(15.5), f'{DOOR_W}"')
+    dim_v(svg, dtop, dbot, ox + 32 * s, f'{DOOR_H}"', side="left")
     dim_v(svg, railtop, railbot, ox - 30, f'{EL_BODY}"', side="left")
     svg.text(ox - 30, railtop - EL_TOP * s / 2 + 4, f'{EL_TOP}"', size=10, anchor="end")
     svg.text(ox - 30, railbot + EL_BOT * s / 2 + 4, f'{EL_BOT}"', size=10, anchor="end")
