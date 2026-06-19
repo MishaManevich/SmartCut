@@ -24,10 +24,20 @@ matches the drawing's lettering (and supplies the `0` that the original drawing
 never contained). Everything else — including the front door view with all its
 hardware — is the literal original.
 
+### 12×12 (both directions)
+
+`build12.py` makes the square **12×12** (the only size where the 8' door wall
+also grows, to 12'). It applies the same splice **horizontally** as well —
+tiling the back wall, the front/door wall, the ceiling width, and the door
+elevation — then moves the ceiling header over the shifted ceiling and relabels
+all six overall dims to `144"`. The door itself stays original; extra wall
+panels are added to its right.
+
 ## Usage
 
 ```bash
-python3 build.py
+python3 build.py      # 8x10, 8x12, 8x14, 8x16
+python3 build12.py    # 12x12
 ```
 
 Outputs in `out/`:
