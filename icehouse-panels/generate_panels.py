@@ -64,6 +64,11 @@ class SVG:
                            f'height="{h:.1f}" fill="{fill}" stroke="{stroke}" '
                            f'stroke-width="{width}"/>')
 
+    def rrect(self, x, y, w, h, rx=3, stroke="#1a1a1a", width=1.0, fill="none"):
+        self.parts.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" '
+                           f'height="{h:.1f}" rx="{rx:.1f}" ry="{rx:.1f}" '
+                           f'fill="{fill}" stroke="{stroke}" stroke-width="{width}"/>')
+
     def poly(self, pts, stroke="#1a1a1a", width=1.0, fill="none"):
         p = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
         self.parts.append(f'<polygon points="{p}" fill="{fill}" stroke="{stroke}" '
@@ -249,15 +254,37 @@ def draw_deck(svg, ox, oy, depth):
 
 
 # ---- FRONT elevation (aligned under the plan) ------------------------------
-# door hardware, as inch bounding boxes measured off the original 8x8 drawing
-# (x from wall left, y down from wall top).  RED = on the door.
-HW_RED = [
-    (46.0, 7.5, 48.0, 13.7),     # top cam-lock (vertical) near the latch side
-    (17.3, 16.5, 28.1, 23.2),    # upper hinge on the left jamb
-    (43.1, 45.7, 55.8, 49.3),    # handle / latch, mid-height (crosses right jamb)
-    (17.3, 74.1, 28.1, 81.3),    # lower hinge on the left jamb
-]
 WALL_LOCK_Y = (19, 67)    # blue cam-locks on the outer left & right wall edges
+RED = "#e02222"
+PANE = "#ffffff"          # hardware body fill
+
+
+def hw_camlock(svg, cx, cy, s, color=RED):
+    """vertical rounded cam-lock pill with a center slot."""
+    w, h = 2.6 * s, 6.6 * s
+    svg.rrect(cx - w / 2, cy - h / 2, w, h, rx=w / 2, stroke=color, width=1.3, fill=PANE)
+    svg.line(cx - w * 0.32, cy, cx + w * 0.32, cy, stroke=color, width=0.8)
+
+
+def hw_drawlatch(svg, jx, cy, s):
+    """draw-latch: vertical plate at jamb (jx) + horizontal lever extending right."""
+    pw, ph = 2.8 * s, 7.6 * s
+    svg.rrect(jx - pw * 0.55, cy - ph / 2, pw, ph, rx=0.9 * s, stroke=RED, width=1.3,
+              fill=PANE)
+    lw, lh = 9.4 * s, 3.8 * s
+    svg.rrect(jx + 0.6 * s, cy - lh / 2, lw, lh, rx=lh / 2, stroke=RED, width=1.3,
+              fill=PANE)
+    svg.circle(jx + 1.3 * s, cy, 1.0 * s, stroke=RED, width=1.0, fill=PANE)
+
+
+def hw_handle(svg, cx, cy, s):
+    """compression handle: left shaft + rounded body with a round cam/knob."""
+    svg.line(cx - 11 * s, cy, cx - 2.5 * s, cy, stroke=RED, width=1.5)
+    bw, bh = 7.5 * s, 4.4 * s
+    svg.rrect(cx - bw / 2, cy - bh / 2, bw, bh, rx=1.1 * s, stroke=RED, width=1.3,
+              fill=PANE)
+    svg.line(cx - bw / 2, cy, cx + bw / 2, cy, stroke=RED, width=0.7)
+    svg.circle(cx + bw * 0.18, cy, 1.7 * s, stroke=RED, width=1.3, fill=PANE)
 
 
 def draw_elevation(svg, ox, oy, op0, op1):
@@ -286,20 +313,16 @@ def draw_elevation(svg, ox, oy, op0, op1):
     svg.line((dx0 + dx1) / 2, dtop, (dx0 + dx1) / 2, dbot, width=0.4,
              stroke="#bbb")                                        # leaf reveal
 
-    # ---- door hardware (red): top cam-lock, two left-jamb hinges, latch handle
-    for xi0, yi0, xi1, yi1 in HW_RED:
-        svg.rect(ox + xi0 * s, yabs(yi0), (xi1 - xi0) * s, (yi1 - yi0) * s,
-                 stroke="#cc2222", width=1.1, fill="#f4d0d0")
-    # knob at the outer end of the handle
-    svg.circle(ox + 55.8 * s, yabs(47.5), 2.4 * s * 0.5, stroke="#cc2222",
-               width=1.1, fill="#f4d0d0")
+    # ---- door hardware (red), drawn to match the original latches ----
+    hw_camlock(svg, ox + 47 * s, yabs(10.6), s)        # top cam-lock
+    hw_drawlatch(svg, dx0, yabs(19.8), s)              # upper draw-latch (left jamb)
+    hw_drawlatch(svg, dx0, yabs(77.7), s)              # lower draw-latch (left jamb)
+    hw_handle(svg, ox + 50 * s, yabs(47.5), s)         # latch handle (right side)
 
     # ---- wall cam-locks (blue) on the outer left & right edges
     for cy in WALL_LOCK_Y:
-        svg.rect(ox - 4, yabs(cy) - 5, 8, 10, stroke="#2b5fb3", width=1.0,
-                 fill="#2b5fb3")
-        svg.rect(ox + Wp - 4, yabs(cy) - 5, 8, 10, stroke="#2b5fb3", width=1.0,
-                 fill="#2b5fb3")
+        hw_camlock(svg, ox, yabs(cy), s, color="#2b5fb3")
+        hw_camlock(svg, ox + Wp, yabs(cy), s, color="#2b5fb3")
     # CAM-LOCK callout pointing at the right-edge cam-locks
     lx, ly = ox + Wp + 66, yabs((WALL_LOCK_Y[0] + WALL_LOCK_Y[1]) / 2)
     for cy in WALL_LOCK_Y:
